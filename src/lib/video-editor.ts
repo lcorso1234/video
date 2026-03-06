@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { access, mkdir, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -27,6 +27,17 @@ export type RenderVideoInput = {
   lowerThirdSubtitle?: string;
   lowerThirdStart?: number;
   lowerThirdDuration?: number;
+  subtitlesEnabled?: boolean;
+  subtitleFile?: File | null;
+  subtitleAutoGenerate?: boolean;
+  subtitleFontSize?: number;
+  subtitleFontColor?: string;
+  subtitleOutlineColor?: string;
+  subtitleOutlineWidth?: number;
+  subtitleBackgroundColor?: string;
+  subtitleBackgroundOpacity?: number;
+  subtitleMarginV?: number;
+  subtitleShadow?: number;
 };
 
 type MediaInfo = {
@@ -63,6 +74,17 @@ type RenderTheme = {
   fontChoice?: string;
 };
 
+type SubtitleSettings = {
+  fontSize: number;
+  fontColor: string;
+  outlineColor: string;
+  outlineWidth: number;
+  backgroundColor: string;
+  backgroundOpacity: number;
+  marginV: number;
+  shadow: number;
+};
+
 type EncodeProfile = {
   key: "fast" | "balanced" | "high";
   preset: string;
@@ -73,6 +95,17 @@ type EncodeProfile = {
 
 type SoundtrackChoice = "startup-chime" | "spirited-blues";
 
+type WhisperSegment = {
+  start?: number;
+  end?: number;
+  text?: string;
+};
+
+type WhisperResponse = {
+  text?: string;
+  segments?: Array<WhisperSegment>;
+};
+
 const jobsRoot = path.join(process.cwd(), ".video-editor-jobs");
 const fallbackOutputName = "edited-video.mp4";
 const defaultFps = 30;
@@ -80,6 +113,13 @@ const fallbackWidth = 1920;
 const fallbackHeight = 1080;
 const defaultTrailerDuration = 3.5;
 const maxTrailerDuration = 12;
+const defaultSubtitleFontSize = 40;
+const defaultSubtitleOutlineWidth = 2;
+const defaultSubtitleBackgroundColor = "#0f172a";
+const defaultSubtitleBackgroundOpacity = 28;
+const defaultSubtitleMarginV = 95;
+const defaultSubtitleShadow = 1;
+const defaultSubtitleLanguage = "en";
 const defaultTheme: RenderTheme = {
   backgroundColor: "#050816",
   textColor: "#f8fafc",
@@ -251,6 +291,137 @@ function escapeFilterValue(value: string) {
 
 function escapeConcatPath(value: string) {
   return value.replace(/'/g, "'\\''");
+}
+
+function clampNumber(value: number | undefined, fallback: number, minimum: number, maximum: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function escapeSubtitlePath(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function escapeSubtitleStyleValue(value: string) {
+  return value.replace(/'/g, "\\'").replace(/,/g, "\\,");
+}
+
+function toAssColor(value: string, fallback: string, opacityPercent: number) {
+  const normalized = normalizeHexColor(value, fallback);
+  const red = Number.parseInt(normalized.slice(1, 3), 16);
+  const green = Number.parseInt(normalized.slice(3, 5), 16);
+  const blue = Number.parseInt(normalized.slice(5, 7), 16);
+  const opacity = Math.round(Math.max(0, Math.min(100, opacityPercent)) * 2.55);
+  const alpha = opacity.toString(16).padStart(2, "0");
+
+  return `&H${alpha}${blue.toString(16).padStart(2, "0")}${green.toString(
+    16,
+  ).padStart(2, "0")}${red.toString(16).padStart(2, "0")}`;
+}
+
+function timestampToSrtTime(value: number) {
+  const clamped = Math.max(0, value);
+  const totalMs = Math.floor(clamped * 1000);
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const seconds = Math.floor((totalMs % 60_000) / 1000);
+  const milliseconds = totalMs % 1000;
+
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")},${String(milliseconds).padStart(3, "0")}`;
+}
+
+function sanitizeSrtText(value: string) {
+  return value
+    .replace(/\r/g, "")
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildSrtFromTranscription(segments: Array<WhisperSegment>) {
+  const lines: string[] = [];
+  const validSegments = segments.filter(
+    (segment) =>
+      Number.isFinite(segment.start ?? NaN) &&
+      Number.isFinite(segment.end ?? NaN) &&
+      segment.text &&
+      segment.text.trim(),
+  );
+  validSegments.forEach((segment, index) => {
+    const start = Number(segment.start);
+    const end = Number(segment.end);
+    const text = sanitizeSrtText(segment.text);
+    lines.push(String(index + 1));
+    lines.push(`${timestampToSrtTime(start)} --> ${timestampToSrtTime(end)}`);
+    lines.push(text);
+    lines.push("");
+  });
+
+  return lines.join("\n");
+}
+
+async function extractAudioForTranscription(params: {
+  inputPath: string;
+  outputPath: string;
+}) {
+  await runCommand(getFfmpegBinaryPath(), [
+    "-y",
+    "-i",
+    params.inputPath,
+    "-vn",
+    "-ac",
+    "1",
+    "-ar",
+    "16000",
+    "-acodec",
+    "pcm_s16le",
+    "-f",
+    "wav",
+    params.outputPath,
+  ]);
+}
+
+async function transcribeAudioToSrt(params: {
+  audioPath: string;
+  outputPath: string;
+  language: string;
+}) {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("Auto subtitle generation requires OPENAI_API_KEY in the environment.");
+  }
+
+  const audioBytes = await readFile(params.audioPath);
+  const formData = new FormData();
+  formData.append("file", new Blob([audioBytes]), "audio.wav");
+  formData.append("model", "whisper-1");
+  formData.append("response_format", "verbose_json");
+  formData.append("language", params.language);
+
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Whisper transcription failed: ${detail || response.status}`);
+  }
+
+  const payload = (await response.json()) as WhisperResponse;
+  const segments = Array.isArray(payload.segments) ? payload.segments : [];
+  const srt = buildSrtFromTranscription(segments);
+  if (!srt.trim()) {
+    throw new Error("No subtitle segments found in transcription result.");
+  }
+
+  await writeFile(params.outputPath, `${srt.trim()}\n`);
 }
 
 function clampTrailerDuration(value: number | undefined) {
@@ -536,6 +707,70 @@ function buildVideoFilter(
   return filters.join(",");
 }
 
+function buildSubtitleForceStyle(theme: RenderTheme, settings: SubtitleSettings) {
+  const fontName = escapeSubtitleStyleValue(theme.fontChoice || "Poppins");
+
+  return [
+    `Fontname=${fontName}`,
+    `Fontsize=${Math.round(settings.fontSize)}`,
+    `PrimaryColour=${toAssColor(settings.fontColor, "#ffffff", 0)}`,
+    `Outline=${Math.max(0, Math.round(settings.outlineWidth))}`,
+    `OutlineColour=${toAssColor(settings.outlineColor, "#000000", 0)}`,
+    `BackColour=${toAssColor(settings.backgroundColor, "#0f172a", settings.backgroundOpacity)}`,
+    "BorderStyle=3",
+    "Alignment=2",
+    `MarginV=${Math.round(settings.marginV)}`,
+    `Shadow=${Math.max(0, Math.round(settings.shadow))}`,
+    "Bold=1",
+  ].join(",");
+}
+
+function buildSubtitleFilter(path: string, theme: RenderTheme, settings: SubtitleSettings) {
+  const style = buildSubtitleForceStyle(theme, settings);
+  const safePath = escapeSubtitlePath(path);
+  return `subtitles=filename='${safePath}':force_style='${style}'`;
+}
+
+async function applySubtitlesToVideo(params: {
+  inputPath: string;
+  outputPath: string;
+  subtitlePath: string;
+  theme: RenderTheme;
+  quality: EncodeProfile;
+  subtitleSettings: SubtitleSettings;
+}) {
+  const subtitleFilter = buildSubtitleFilter(
+    params.subtitlePath,
+    params.theme,
+    params.subtitleSettings,
+  );
+
+  await runCommand(getFfmpegBinaryPath(), [
+    "-y",
+    "-i",
+    params.inputPath,
+    "-vf",
+    subtitleFilter,
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0?",
+    "-c:v",
+    "libx264",
+    "-preset",
+    params.quality.preset,
+    "-crf",
+    params.quality.crf.toString(),
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "copy",
+    "-movflags",
+    "+faststart",
+    params.outputPath,
+  ]);
+}
+
 async function normalizeClip(params: {
   inputPath: string;
   outputPath: string;
@@ -798,6 +1033,9 @@ export async function renderVideo(input: RenderVideoInput): Promise<RenderedVide
   const logoUploadPath = input.brandLogo?.size
     ? path.join(uploadsDirectory, `logo${getExtension(input.brandLogo.name, ".png")}`)
     : null;
+  const subtitleUploadPath = input.subtitleFile?.size
+    ? path.join(uploadsDirectory, `subtitles${getExtension(input.subtitleFile.name, ".srt")}`)
+    : null;
 
   if (introUploadPath && input.introVideo) {
     await saveFormFile(input.introVideo, introUploadPath);
@@ -809,6 +1047,9 @@ export async function renderVideo(input: RenderVideoInput): Promise<RenderedVide
 
   if (logoUploadPath && input.brandLogo) {
     await saveFormFile(input.brandLogo, logoUploadPath);
+  }
+  if (subtitleUploadPath && input.subtitleFile) {
+    await saveFormFile(input.subtitleFile, subtitleUploadPath);
   }
 
   const sourceMedia = await probeMedia(sourceUploadPath);
@@ -836,6 +1077,29 @@ export async function renderVideo(input: RenderVideoInput): Promise<RenderedVide
           duration: input.lowerThirdDuration ?? 6,
         }
       : null;
+
+  const subtitleSettings =
+    input.subtitlesEnabled && (subtitleUploadPath || input.subtitleAutoGenerate)
+      ? {
+          fontSize: clampNumber(input.subtitleFontSize, defaultSubtitleFontSize, 18, 110),
+          fontColor: normalizeHexColor(input.subtitleFontColor || "", "#ffffff"),
+          outlineColor: normalizeHexColor(input.subtitleOutlineColor || "", "#000000"),
+          outlineWidth: clampNumber(input.subtitleOutlineWidth, defaultSubtitleOutlineWidth, 0, 8),
+          backgroundColor: normalizeHexColor(
+            input.subtitleBackgroundColor || "",
+            defaultSubtitleBackgroundColor,
+          ),
+          backgroundOpacity: clampNumber(
+            input.subtitleBackgroundOpacity,
+            defaultSubtitleBackgroundOpacity,
+            0,
+            100,
+          ),
+          marginV: clampNumber(input.subtitleMarginV, defaultSubtitleMarginV, 20, 220),
+          shadow: clampNumber(input.subtitleShadow, defaultSubtitleShadow, 0, 8),
+        }
+      : null;
+  let subtitleRenderPath: string | null = subtitleUploadPath;
 
   await normalizeClip({
     inputPath: sourceUploadPath,
@@ -939,6 +1203,7 @@ export async function renderVideo(input: RenderVideoInput): Promise<RenderedVide
   await writeFile(concatListPath, concatList);
 
   const outputPath = getJobOutputPath(jobId);
+  const stitchedPath = path.join(workingDirectory, "stitched.mp4");
   await runCommand(getFfmpegBinaryPath(), [
     "-y",
     "-f",
@@ -963,8 +1228,51 @@ export async function renderVideo(input: RenderVideoInput): Promise<RenderedVide
     "2",
     "-movflags",
     "+faststart",
-    outputPath,
+    stitchedPath,
   ]);
+
+  if (input.subtitlesEnabled && !subtitleRenderPath && input.subtitleAutoGenerate) {
+    const subtitleAudioPath = path.join(workingDirectory, "subtitle-source.wav");
+    const generatedSubtitlePath = path.join(workingDirectory, "auto-subtitles.srt");
+    await extractAudioForTranscription({
+      inputPath: stitchedPath,
+      outputPath: subtitleAudioPath,
+    });
+    await transcribeAudioToSrt({
+      audioPath: subtitleAudioPath,
+      outputPath: generatedSubtitlePath,
+      language: defaultSubtitleLanguage,
+    });
+    subtitleRenderPath = generatedSubtitlePath;
+  }
+
+  if (input.subtitlesEnabled && !subtitleRenderPath) {
+    throw new Error(
+      "Subtitles are enabled, but no subtitle file was provided. Upload a .srt, .vtt, or .ass file or enable auto-generation.",
+    );
+  }
+
+  if (subtitleSettings && subtitleRenderPath) {
+    await applySubtitlesToVideo({
+      inputPath: stitchedPath,
+      outputPath,
+      subtitlePath: subtitleRenderPath,
+      theme,
+      quality,
+      subtitleSettings,
+    });
+  } else {
+    await runCommand(getFfmpegBinaryPath(), [
+      "-y",
+      "-i",
+      stitchedPath,
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+  }
 
   const fileStat = await stat(outputPath);
 

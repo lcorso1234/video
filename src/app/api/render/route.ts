@@ -11,6 +11,14 @@ function getOptionalVideo(value: FormDataEntryValue | null) {
   return value;
 }
 
+function getOptionalFile(value: FormDataEntryValue | null) {
+  if (!(value instanceof File) || value.size === 0) {
+    return null;
+  }
+
+  return value;
+}
+
 function getNumberValue(value: FormDataEntryValue | null, fallback: number) {
   if (typeof value !== "string") {
     return fallback;
@@ -64,11 +72,51 @@ export async function POST(request: Request) {
       );
     }
 
+    const subtitlesEnabled = getBooleanValue(formData.get("subtitlesEnabled"), false);
+    const subtitleAutoGenerate = getBooleanValue(formData.get("subtitleAutoGenerate"), false);
+    const subtitleFile = getOptionalFile(formData.get("subtitleFile"));
+
+    const isOpenAIKeyMissing = !process.env.OPENAI_API_KEY?.trim();
+    if (
+      subtitlesEnabled &&
+      subtitleAutoGenerate &&
+      !subtitleFile &&
+      isOpenAIKeyMissing
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Auto subtitle generation requires OPENAI_API_KEY in the environment. Add it to .env.local and restart the server.",
+        },
+        { status: 400 },
+      );
+    }
+
     const result = await renderVideo({
       sourceVideo,
       introVideo: getOptionalVideo(formData.get("intro")),
       outroVideo: getOptionalVideo(formData.get("outro")),
       brandLogo: getOptionalVideo(formData.get("logo")),
+      subtitlesEnabled,
+      subtitleFile,
+      subtitleAutoGenerate,
+      subtitleFontSize: getNumberValue(formData.get("subtitleFontSize"), 40),
+      subtitleFontColor: getTextValue(formData.get("subtitleFontColor"), "#ffffff"),
+      subtitleOutlineColor: getTextValue(
+        formData.get("subtitleOutlineColor"),
+        "#000000",
+      ),
+      subtitleOutlineWidth: getNumberValue(formData.get("subtitleOutlineWidth"), 2),
+      subtitleBackgroundColor: getTextValue(
+        formData.get("subtitleBackgroundColor"),
+        "#0f172a",
+      ),
+      subtitleBackgroundOpacity: getNumberValue(
+        formData.get("subtitleBackgroundOpacity"),
+        28,
+      ),
+      subtitleMarginV: getNumberValue(formData.get("subtitleMarginV"), 95),
+      subtitleShadow: getNumberValue(formData.get("subtitleShadow"), 1),
       generateTrailerIntroOutro: getBooleanValue(
         formData.get("generateTrailerIntroOutro"),
         true,

@@ -16,6 +16,21 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Automatic subtitle transcription
+
+Auto-captioning uses OpenAI Whisper and requires an OpenAI API key.
+
+1. Create an API key at [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+2. Create `.env.local` in the project root with:
+
+```bash
+OPENAI_API_KEY=sk-...
+```
+
+3. Restart the dev server.
+
+With this set, keep `Auto-generate subtitles from audio` enabled in the UI and the pipeline will transcribe the final stitched timeline, then burn captions into the output.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

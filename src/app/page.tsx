@@ -42,6 +42,67 @@ const googleFonts = [
   "Inconsolata",
 ] as const;
 
+type SubtitlePreset = "editorial" | "cinematic" | "minimal" | "broadcast" | "custom";
+
+type SubtitlePresetValues = {
+  label: string;
+  fontSize: string;
+  fontColor: string;
+  outlineColor: string;
+  outlineWidth: string;
+  backgroundColor: string;
+  backgroundOpacity: string;
+  marginV: string;
+  shadow: string;
+};
+
+const subtitlePresets: Record<Exclude<SubtitlePreset, "custom">, SubtitlePresetValues> = {
+  editorial: {
+    label: "Editorial",
+    fontSize: "40",
+    fontColor: "#ffffff",
+    outlineColor: "#0b1020",
+    outlineWidth: "2",
+    backgroundColor: "#0f172a",
+    backgroundOpacity: "28",
+    marginV: "98",
+    shadow: "1",
+  },
+  cinematic: {
+    label: "Cinematic",
+    fontSize: "44",
+    fontColor: "#f8fafc",
+    outlineColor: "#1e293b",
+    outlineWidth: "3",
+    backgroundColor: "#020617",
+    backgroundOpacity: "32",
+    marginV: "88",
+    shadow: "2",
+  },
+  minimal: {
+    label: "Minimal Clean",
+    fontSize: "36",
+    fontColor: "#ffffff",
+    outlineColor: "#111827",
+    outlineWidth: "1",
+    backgroundColor: "#000000",
+    backgroundOpacity: "0",
+    marginV: "90",
+    shadow: "1",
+  },
+  broadcast: {
+    label: "Broadcast Readable",
+    fontSize: "42",
+    fontColor: "#ffffff",
+    outlineColor: "#000000",
+    outlineWidth: "2",
+    backgroundColor: "#020617",
+    backgroundOpacity: "36",
+    marginV: "80",
+    shadow: "3",
+  },
+};
+
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 MB";
@@ -61,6 +122,18 @@ export default function Home() {
   const [soundtrackChoice, setSoundtrackChoice] = useState<
     "startup-chime" | "spirited-blues"
   >("spirited-blues");
+  const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+  const [subtitleAutoGenerate, setSubtitleAutoGenerate] = useState(true);
+  const [subtitleFontSize, setSubtitleFontSize] = useState("40");
+  const [subtitleFontColor, setSubtitleFontColor] = useState("#ffffff");
+  const [subtitleOutlineColor, setSubtitleOutlineColor] = useState("#000000");
+  const [subtitleBackgroundColor, setSubtitleBackgroundColor] = useState("#0f172a");
+  const [subtitleBackgroundOpacity, setSubtitleBackgroundOpacity] = useState("28");
+  const [subtitleOutlineWidth, setSubtitleOutlineWidth] = useState("2");
+  const [subtitleMarginV, setSubtitleMarginV] = useState("98");
+  const [subtitleShadow, setSubtitleShadow] = useState("1");
+  const [subtitlePreset, setSubtitlePreset] = useState<SubtitlePreset>("editorial");
   const [backgroundColor, setBackgroundColor] = useState("#050816");
   const [textColor, setTextColor] = useState("#f8fafc");
   const [accentColor, setAccentColor] = useState("#4f80ff");
@@ -85,6 +158,26 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState("");
   const [result, setResult] = useState<RenderResponse | null>(null);
 
+  function applySubtitlePreset(presetKey: Exclude<SubtitlePreset, "custom">) {
+    const preset = subtitlePresets[presetKey];
+    setSubtitleFontSize(preset.fontSize);
+    setSubtitleFontColor(preset.fontColor);
+    setSubtitleOutlineColor(preset.outlineColor);
+    setSubtitleOutlineWidth(preset.outlineWidth);
+    setSubtitleBackgroundColor(preset.backgroundColor);
+    setSubtitleBackgroundOpacity(preset.backgroundOpacity);
+    setSubtitleMarginV(preset.marginV);
+    setSubtitleShadow(preset.shadow);
+    setSubtitlePreset(presetKey);
+  }
+
+  function markSubtitlePresetCustom() {
+    if (subtitlePreset === "custom") {
+      return;
+    }
+    setSubtitlePreset("custom");
+  }
+
   async function handleRender(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -104,8 +197,21 @@ export default function Home() {
       if (logoFile) {
         formData.append("logo", logoFile);
       }
+      if (subtitleFile) {
+        formData.append("subtitleFile", subtitleFile);
+      }
 
       formData.append("generateTrailerIntroOutro", "true");
+      formData.append("subtitlesEnabled", subtitlesEnabled ? "true" : "false");
+      formData.append("subtitleAutoGenerate", subtitleAutoGenerate ? "true" : "false");
+      formData.append("subtitleFontSize", subtitleFontSize);
+      formData.append("subtitleFontColor", subtitleFontColor);
+      formData.append("subtitleOutlineColor", subtitleOutlineColor);
+      formData.append("subtitleOutlineWidth", subtitleOutlineWidth);
+      formData.append("subtitleBackgroundColor", subtitleBackgroundColor);
+      formData.append("subtitleBackgroundOpacity", subtitleBackgroundOpacity);
+      formData.append("subtitleMarginV", subtitleMarginV);
+      formData.append("subtitleShadow", subtitleShadow);
       formData.append("fontChoice", fontChoice);
       formData.append("qualityProfile", qualityProfile);
       formData.append("soundtrackChoice", soundtrackChoice);
@@ -335,6 +441,209 @@ export default function Home() {
                   value={lowerThirdDuration}
                   onChange={(event) => setLowerThirdDuration(event.target.value)}
                   className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                />
+              </label>
+            </div>
+
+            <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4">
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Enable subtitles</span>
+                <label className="inline-flex items-center gap-3 text-sm text-white/90">
+                  <input
+                    type="checkbox"
+                    checked={subtitlesEnabled}
+                    onChange={(event) => setSubtitlesEnabled(event.target.checked)}
+                    className="h-4 w-4 rounded border-white/30 bg-transparent accent-orange-500"
+                  />
+                  Burn subtitles into the final render
+                </label>
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle design preset</span>
+                <select
+                  value={subtitlePreset}
+                  onChange={(event) => {
+                    const nextPreset = event.target.value as SubtitlePreset;
+                    if (nextPreset === "custom") {
+                      setSubtitlePreset("custom");
+                      return;
+                    }
+                    applySubtitlePreset(nextPreset);
+                  }}
+                  className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white disabled:opacity-50"
+                  disabled={!subtitlesEnabled}
+                >
+                  {Object.entries(subtitlePresets).map(([value, preset]) => (
+                    <option key={value} value={value}>
+                      {preset.label}
+                    </option>
+                  ))}
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle file (.srt / .vtt / .ass)</span>
+                <input
+                  type="file"
+                  accept=".srt,.vtt,.ass"
+                  onChange={(event) => {
+                    const uploadedFile = event.target.files?.[0] ?? null;
+                    setSubtitleFile(uploadedFile);
+                    setSubtitleAutoGenerate(uploadedFile ? false : true);
+                  }}
+                  className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black disabled:file:bg-white/50"
+                  disabled={!subtitlesEnabled}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Auto-generate subtitles from audio</span>
+                <label className="inline-flex items-center gap-3 text-sm text-white/90">
+                  <input
+                    type="checkbox"
+                    checked={subtitleAutoGenerate}
+                    onChange={(event) => {
+                      if (!event.target.checked) {
+                        setSubtitleAutoGenerate(false);
+                        return;
+                      }
+
+                      setSubtitleAutoGenerate(true);
+                      setSubtitleFile(null);
+                    }}
+                    className="h-4 w-4 rounded border-white/30 bg-transparent accent-orange-500 disabled:opacity-50"
+                    disabled={!subtitlesEnabled || Boolean(subtitleFile)}
+                  />
+                  Uses OpenAI Whisper to transcribe the rendered timeline
+                </label>
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle font size</span>
+                <input
+                  type="number"
+                  min="16"
+                  max="110"
+                  step="1"
+                  value={subtitleFontSize}
+                  onChange={(event) => {
+                    markSubtitlePresetCustom();
+                    setSubtitleFontSize(event.target.value);
+                  }}
+                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
+                  disabled={!subtitlesEnabled}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle outline width</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="8"
+                  step="1"
+                  value={subtitleOutlineWidth}
+                  onChange={(event) => {
+                    markSubtitlePresetCustom();
+                    setSubtitleOutlineWidth(event.target.value);
+                  }}
+                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
+                  disabled={!subtitlesEnabled}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle bottom margin</span>
+                <input
+                  type="number"
+                  min="20"
+                  max="220"
+                  step="1"
+                  value={subtitleMarginV}
+                  onChange={(event) => {
+                    markSubtitlePresetCustom();
+                    setSubtitleMarginV(event.target.value);
+                  }}
+                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
+                  disabled={!subtitlesEnabled}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle shadow</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="8"
+                  step="1"
+                  value={subtitleShadow}
+                  onChange={(event) => {
+                    markSubtitlePresetCustom();
+                    setSubtitleShadow(event.target.value);
+                  }}
+                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
+                  disabled={!subtitlesEnabled}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle text color</span>
+                <input
+                  type="color"
+                  value={subtitleFontColor}
+                  onChange={(event) => {
+                    markSubtitlePresetCustom();
+                    setSubtitleFontColor(event.target.value);
+                  }}
+                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent disabled:opacity-50"
+                  disabled={!subtitlesEnabled}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle outline color</span>
+                <input
+                  type="color"
+                  value={subtitleOutlineColor}
+                  onChange={(event) => {
+                    markSubtitlePresetCustom();
+                    setSubtitleOutlineColor(event.target.value);
+                  }}
+                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent disabled:opacity-50"
+                  disabled={!subtitlesEnabled}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Subtitle caption box color</span>
+                <input
+                  type="color"
+                  value={subtitleBackgroundColor}
+                  onChange={(event) => {
+                    markSubtitlePresetCustom();
+                    setSubtitleBackgroundColor(event.target.value);
+                  }}
+                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent disabled:opacity-50"
+                  disabled={!subtitlesEnabled}
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-white/80">Caption box opacity (0-100)</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={subtitleBackgroundOpacity}
+                  onChange={(event) => {
+                    markSubtitlePresetCustom();
+                    setSubtitleBackgroundOpacity(event.target.value);
+                  }}
+                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
+                  disabled={!subtitlesEnabled}
                 />
               </label>
             </div>
