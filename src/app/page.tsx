@@ -1,12 +1,53 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 type RenderResponse = {
   jobId: string;
   filename: string;
   downloadUrl: string;
+  previewUrl?: string;
   sizeInBytes: number;
+};
+
+type SaveToMacResponse = {
+  destinationFolder: string;
+  videoPath: string;
+  videoFilename: string;
+  subtitlePath?: string;
+  subtitleFilename?: string;
+};
+
+type Step1SubtitleResponse = {
+  filename: string;
+  content: string;
+  language: string;
+  draftId: string;
+};
+
+type DraftStateResponse = {
+  draftId: string;
+  sourceFilename: string;
+  subtitleFilename?: string;
+  logoFilename?: string;
+  subtitleContent?: string;
+  updatedAt?: string;
+  error?: string;
+};
+
+type RenderJobPhase = "queued" | "running" | "completed" | "failed";
+type WizardStep = 1 | 2 | 3 | 4;
+
+type RenderStatusResponse = {
+  jobId: string;
+  status: RenderJobPhase;
+  progress: number;
+  message: string;
+  filename?: string;
+  subtitleFilename?: string;
+  sizeInBytes?: number;
+  error?: string;
+  updatedAt?: string;
 };
 
 const googleFonts = [
@@ -42,67 +83,6 @@ const googleFonts = [
   "Inconsolata",
 ] as const;
 
-type SubtitlePreset = "editorial" | "cinematic" | "minimal" | "broadcast" | "custom";
-
-type SubtitlePresetValues = {
-  label: string;
-  fontSize: string;
-  fontColor: string;
-  outlineColor: string;
-  outlineWidth: string;
-  backgroundColor: string;
-  backgroundOpacity: string;
-  marginV: string;
-  shadow: string;
-};
-
-const subtitlePresets: Record<Exclude<SubtitlePreset, "custom">, SubtitlePresetValues> = {
-  editorial: {
-    label: "Editorial",
-    fontSize: "40",
-    fontColor: "#ffffff",
-    outlineColor: "#0b1020",
-    outlineWidth: "2",
-    backgroundColor: "#0f172a",
-    backgroundOpacity: "28",
-    marginV: "98",
-    shadow: "1",
-  },
-  cinematic: {
-    label: "Cinematic",
-    fontSize: "44",
-    fontColor: "#f8fafc",
-    outlineColor: "#1e293b",
-    outlineWidth: "3",
-    backgroundColor: "#020617",
-    backgroundOpacity: "32",
-    marginV: "88",
-    shadow: "2",
-  },
-  minimal: {
-    label: "Minimal Clean",
-    fontSize: "36",
-    fontColor: "#ffffff",
-    outlineColor: "#111827",
-    outlineWidth: "1",
-    backgroundColor: "#000000",
-    backgroundOpacity: "0",
-    marginV: "90",
-    shadow: "1",
-  },
-  broadcast: {
-    label: "Broadcast Readable",
-    fontSize: "42",
-    fontColor: "#ffffff",
-    outlineColor: "#000000",
-    outlineWidth: "2",
-    backgroundColor: "#020617",
-    backgroundOpacity: "36",
-    marginV: "80",
-    shadow: "3",
-  },
-};
-
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 MB";
@@ -111,38 +91,43 @@ function formatBytes(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const draftStorageKey = "video_editor_wizard_draft_id";
+
 export default function Home() {
+  const appleSubtitleFontSize = 48;
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
+  const [introMusicFile, setIntroMusicFile] = useState<File | null>(null);
+  const [outroMusicFile, setOutroMusicFile] = useState<File | null>(null);
+  const [videoFormat, setVideoFormat] = useState<"short" | "wide">("wide");
 
   const [fontChoice, setFontChoice] = useState<(typeof googleFonts)[number]>("Poppins");
   const [qualityProfile, setQualityProfile] = useState<"fast" | "balanced" | "high">(
-    "high",
+    "fast",
   );
   const [soundtrackChoice, setSoundtrackChoice] = useState<
-    "startup-chime" | "spirited-blues"
-  >("spirited-blues");
-  const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
-  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
-  const [subtitleAutoGenerate, setSubtitleAutoGenerate] = useState(true);
-  const [subtitleFontSize, setSubtitleFontSize] = useState("40");
-  const [subtitleFontColor, setSubtitleFontColor] = useState("#ffffff");
-  const [subtitleOutlineColor, setSubtitleOutlineColor] = useState("#000000");
-  const [subtitleBackgroundColor, setSubtitleBackgroundColor] = useState("#0f172a");
-  const [subtitleBackgroundOpacity, setSubtitleBackgroundOpacity] = useState("28");
-  const [subtitleOutlineWidth, setSubtitleOutlineWidth] = useState("2");
-  const [subtitleMarginV, setSubtitleMarginV] = useState("98");
-  const [subtitleShadow, setSubtitleShadow] = useState("1");
-  const [subtitlePreset, setSubtitlePreset] = useState<SubtitlePreset>("editorial");
+    "startup-chime" | "spirited-blues" | "theater-chime" | "trailer-braam" | "piano-lift"
+  >("theater-chime");
+  const [generateTrailerIntroOutro, setGenerateTrailerIntroOutro] = useState(true);
   const [backgroundColor, setBackgroundColor] = useState("#050816");
   const [textColor, setTextColor] = useState("#f8fafc");
   const [accentColor, setAccentColor] = useState("#4f80ff");
+  const [subtitleFontChoice, setSubtitleFontChoice] =
+    useState<(typeof googleFonts)[number]>("Poppins");
+  const [subtitleHighlightColor, setSubtitleHighlightColor] = useState("#E6FF00");
+  const [renderSpeedMode, setRenderSpeedMode] = useState<"turbo" | "balanced" | "quality">(
+    "turbo",
+  );
 
   const [trailerTitle, setTrailerTitle] = useState("COMING UP NEXT");
   const [trailerSubtitle, setTrailerSubtitle] = useState("Hey Siri, come in here.");
   const [trailerOutroTitle, setTrailerOutroTitle] = useState("THANK YOU FOR WATCHING");
   const [trailerOutroSubtitle, setTrailerOutroSubtitle] = useState(
     "Stay tuned for the next release",
+  );
+  const [outroCredits, setOutroCredits] = useState(
+    "Executive Producer - Name\nDirector - Name\nEditor - Name\nPresented by - Organization",
   );
   const [trailerDuration, setTrailerDuration] = useState("3.5");
 
@@ -153,30 +138,172 @@ export default function Home() {
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState(
-    "Upload a video and logo, pick your colors and font, then render.",
+    "Step 1: upload source video. Step 2: configure branding/subtitles. Step 3: render. Step 4: preview and download.",
   );
   const [errorMessage, setErrorMessage] = useState("");
   const [result, setResult] = useState<RenderResponse | null>(null);
+  const [activeRenderJobId, setActiveRenderJobId] = useState<string | null>(null);
+  const [renderStatus, setRenderStatus] = useState<RenderStatusResponse | null>(null);
+  const [isSavingToMac, setIsSavingToMac] = useState(false);
+  const [savedToMacPath, setSavedToMacPath] = useState("");
+  const [saveToMacError, setSaveToMacError] = useState("");
+  const [isGeneratingSrt, setIsGeneratingSrt] = useState(false);
+  const [step1SrtMessage, setStep1SrtMessage] = useState("");
+  const [draftId, setDraftId] = useState("");
+  const [step2SaveMessage, setStep2SaveMessage] = useState("");
+  const [wizardStep, setWizardStep] = useState<WizardStep>(1);
+  const statusPollerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const subtitleInputRef = useRef<HTMLInputElement | null>(null);
 
-  function applySubtitlePreset(presetKey: Exclude<SubtitlePreset, "custom">) {
-    const preset = subtitlePresets[presetKey];
-    setSubtitleFontSize(preset.fontSize);
-    setSubtitleFontColor(preset.fontColor);
-    setSubtitleOutlineColor(preset.outlineColor);
-    setSubtitleOutlineWidth(preset.outlineWidth);
-    setSubtitleBackgroundColor(preset.backgroundColor);
-    setSubtitleBackgroundOpacity(preset.backgroundOpacity);
-    setSubtitleMarginV(preset.marginV);
-    setSubtitleShadow(preset.shadow);
-    setSubtitlePreset(presetKey);
-  }
+  useEffect(() => {
+    return () => {
+      if (statusPollerRef.current) {
+        clearInterval(statusPollerRef.current);
+        statusPollerRef.current = null;
+      }
+    };
+  }, []);
 
-  function markSubtitlePresetCustom() {
-    if (subtitlePreset === "custom") {
+  useEffect(() => {
+    if (!subtitleInputRef.current) {
       return;
     }
-    setSubtitlePreset("custom");
-  }
+
+    if (!subtitleFile) {
+      subtitleInputRef.current.value = "";
+      return;
+    }
+
+    try {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(subtitleFile);
+      subtitleInputRef.current.files = dataTransfer.files;
+    } catch {
+      void 0;
+    }
+  }, [subtitleFile]);
+
+  useEffect(() => {
+    if (!draftId) {
+      localStorage.removeItem(draftStorageKey);
+      return;
+    }
+
+    localStorage.setItem(draftStorageKey, draftId);
+  }, [draftId]);
+
+  useEffect(() => {
+    const restoreDraftId = localStorage.getItem(draftStorageKey);
+    if (!restoreDraftId) {
+      return;
+    }
+
+    const restoreDraft = async () => {
+      try {
+        const response = await fetch(`/api/drafts/${restoreDraftId}`, {
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as DraftStateResponse;
+        if (!response.ok) {
+          localStorage.removeItem(draftStorageKey);
+          return;
+        }
+
+        setDraftId(payload.draftId);
+        if (payload.subtitleContent) {
+          const restoredSubtitleFile = new File(
+            [payload.subtitleContent],
+            payload.subtitleFilename || "subtitles.srt",
+            { type: "application/x-subrip; charset=utf-8" },
+          );
+          setSubtitleFile(restoredSubtitleFile);
+        }
+        setStep2SaveMessage(
+          `Restored backend draft${payload.subtitleFilename ? ` | Subtitle: ${payload.subtitleFilename}` : ""}${payload.logoFilename ? ` | Logo: ${payload.logoFilename}` : ""}`,
+        );
+        setStatusMessage("Restored saved pipeline draft from backend.");
+      } catch {
+        localStorage.removeItem(draftStorageKey);
+      }
+    };
+
+    void restoreDraft();
+  }, []);
+
+  useEffect(() => {
+    if (!activeRenderJobId || !isSubmitting) {
+      if (statusPollerRef.current) {
+        clearInterval(statusPollerRef.current);
+        statusPollerRef.current = null;
+      }
+      return;
+    }
+
+    const pollStatus = async () => {
+      try {
+        const response = await fetch(`/api/render/${activeRenderJobId}`, {
+          cache: "no-store",
+        });
+
+        if (response.status === 404) {
+          return;
+        }
+
+        const payload = (await response.json()) as RenderStatusResponse & {
+          error?: string;
+        };
+        if (!response.ok) {
+          throw new Error(payload.error || "Unable to get render status.");
+        }
+
+        setRenderStatus(payload);
+        setStatusMessage(payload.message);
+
+        if (payload.status === "completed") {
+          if (statusPollerRef.current) {
+            clearInterval(statusPollerRef.current);
+            statusPollerRef.current = null;
+          }
+
+          setActiveRenderJobId(null);
+          setIsSubmitting(false);
+          setResult({
+            jobId: payload.jobId,
+            filename: payload.filename || `${payload.jobId}.mp4`,
+            downloadUrl: `/api/download/${payload.jobId}`,
+            previewUrl: `/api/preview/${payload.jobId}`,
+            sizeInBytes: payload.sizeInBytes ?? 0,
+          });
+          setWizardStep(4);
+          setErrorMessage("");
+          return;
+        }
+
+        if (payload.status === "failed") {
+          if (statusPollerRef.current) {
+            clearInterval(statusPollerRef.current);
+            statusPollerRef.current = null;
+          }
+
+          setActiveRenderJobId(null);
+          setIsSubmitting(false);
+          setErrorMessage(payload.error || payload.message || "Render failed.");
+        }
+      } catch (error) {
+        if (statusPollerRef.current) {
+          clearInterval(statusPollerRef.current);
+          statusPollerRef.current = null;
+        }
+
+        setActiveRenderJobId(null);
+        setIsSubmitting(false);
+        setErrorMessage(error instanceof Error ? error.message : "Unable to get render status.");
+      }
+    };
+
+    void pollStatus();
+    statusPollerRef.current = setInterval(pollStatus, 1500);
+  }, [activeRenderJobId, isSubmitting]);
 
   async function handleRender(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -186,65 +313,212 @@ export default function Home() {
       return;
     }
 
+    if (statusPollerRef.current) {
+      clearInterval(statusPollerRef.current);
+      statusPollerRef.current = null;
+    }
+
     setErrorMessage("");
+    setSaveToMacError("");
+    setSavedToMacPath("");
     setResult(null);
+    setRenderStatus({
+      jobId: "",
+      status: "queued",
+      progress: 0,
+      message: "Preparing render job...",
+    });
     setIsSubmitting(true);
-    setStatusMessage("Rendering trailer intro/outro, lower thirds, and final export...");
 
     try {
       const formData = new FormData();
-      formData.append("video", videoFile);
+      if (videoFile) {
+        formData.append("video", videoFile);
+      }
+      if (draftId) {
+        formData.append("draftId", draftId);
+      }
       if (logoFile) {
         formData.append("logo", logoFile);
       }
       if (subtitleFile) {
         formData.append("subtitleFile", subtitleFile);
       }
+      if (generateTrailerIntroOutro && introMusicFile) {
+        formData.append("introMusic", introMusicFile);
+      }
+      if (generateTrailerIntroOutro && outroMusicFile) {
+        formData.append("outroMusic", outroMusicFile);
+      }
 
-      formData.append("generateTrailerIntroOutro", "true");
-      formData.append("subtitlesEnabled", subtitlesEnabled ? "true" : "false");
-      formData.append("subtitleAutoGenerate", subtitleAutoGenerate ? "true" : "false");
-      formData.append("subtitleFontSize", subtitleFontSize);
-      formData.append("subtitleFontColor", subtitleFontColor);
-      formData.append("subtitleOutlineColor", subtitleOutlineColor);
-      formData.append("subtitleOutlineWidth", subtitleOutlineWidth);
-      formData.append("subtitleBackgroundColor", subtitleBackgroundColor);
-      formData.append("subtitleBackgroundOpacity", subtitleBackgroundOpacity);
-      formData.append("subtitleMarginV", subtitleMarginV);
-      formData.append("subtitleShadow", subtitleShadow);
+      formData.append(
+        "generateTrailerIntroOutro",
+        generateTrailerIntroOutro ? "true" : "false",
+      );
+      formData.append("videoFormat", videoFormat);
       formData.append("fontChoice", fontChoice);
-      formData.append("qualityProfile", qualityProfile);
       formData.append("soundtrackChoice", soundtrackChoice);
       formData.append("backgroundColor", backgroundColor);
       formData.append("textColor", textColor);
       formData.append("accentColor", accentColor);
-      formData.append("trailerTitle", trailerTitle);
-      formData.append("trailerSubtitle", trailerSubtitle);
-      formData.append("trailerOutroTitle", trailerOutroTitle);
-      formData.append("trailerOutroSubtitle", trailerOutroSubtitle);
-      formData.append("trailerDuration", trailerDuration);
+      if (generateTrailerIntroOutro) {
+        formData.append("trailerTitle", trailerTitle);
+        formData.append("trailerSubtitle", trailerSubtitle);
+        formData.append("trailerOutroTitle", trailerOutroTitle);
+        formData.append("trailerOutroSubtitle", trailerOutroSubtitle);
+        formData.append("outroCredits", outroCredits);
+        formData.append("trailerDuration", trailerDuration);
+      }
       formData.append("lowerThirdTitle", lowerThirdTitle);
       formData.append("lowerThirdSubtitle", lowerThirdSubtitle);
       formData.append("lowerThirdStart", lowerThirdStart);
       formData.append("lowerThirdDuration", lowerThirdDuration);
+      formData.append("subtitleFontChoice", subtitleFontChoice);
+      formData.append("subtitleHighlightColor", subtitleHighlightColor);
+      formData.append("renderSpeedMode", renderSpeedMode);
+      formData.append("subtitleLanguage", "en");
 
       const response = await fetch("/api/render", {
         method: "POST",
         body: formData,
       });
 
-      const payload = (await response.json()) as RenderResponse & { error?: string };
+      const payload = (await response.json()) as RenderResponse &
+        RenderStatusResponse & { error?: string };
       if (!response.ok) {
         throw new Error(payload.error || "Render failed.");
       }
 
-      setResult(payload);
-      setStatusMessage("Render complete. Download is ready.");
+      setActiveRenderJobId(payload.jobId);
+      setRenderStatus({
+        jobId: payload.jobId,
+        status: payload.status ?? "running",
+        progress: payload.progress ?? 0,
+        message: payload.message ?? "Render started.",
+      });
+      setStatusMessage(payload.message ?? "Render started.");
+      setSaveToMacError("");
+      setSavedToMacPath("");
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Render failed.");
       setStatusMessage("Render did not complete.");
-    } finally {
       setIsSubmitting(false);
+      setActiveRenderJobId(null);
+      setRenderStatus(null);
+    }
+  }
+
+  async function handleSaveToMac() {
+    if (!result || isSavingToMac) {
+      return;
+    }
+
+    setIsSavingToMac(true);
+    setSaveToMacError("");
+    setSavedToMacPath("");
+
+    try {
+      const response = await fetch(`/api/save/${result.jobId}`, {
+        method: "POST",
+      });
+      const payload = (await response.json()) as SaveToMacResponse & { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || "Unable to save files to Mac safe folder.");
+      }
+
+      setSavedToMacPath(payload.destinationFolder);
+    } catch (error) {
+      setSaveToMacError(
+        error instanceof Error ? error.message : "Unable to save files to Mac safe folder.",
+      );
+    } finally {
+      setIsSavingToMac(false);
+    }
+  }
+
+  async function persistDraftAssets(input: {
+    subtitleFile?: File | null;
+    logoFile?: File | null;
+  }) {
+    if (!draftId) {
+      return;
+    }
+
+    const formData = new FormData();
+    if (input.subtitleFile) {
+      formData.append("subtitleFile", input.subtitleFile);
+    }
+    if (input.logoFile) {
+      formData.append("logo", input.logoFile);
+    }
+    if (![...formData.keys()].length) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/drafts/${draftId}/assets`, {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json()) as {
+        subtitleFilename?: string;
+        logoFilename?: string;
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error || "Unable to save step 2 assets.");
+      }
+
+      setStep2SaveMessage(
+        `Saved to backend${payload.subtitleFilename ? ` | Subtitle: ${payload.subtitleFilename}` : ""}${payload.logoFilename ? ` | Logo: ${payload.logoFilename}` : ""}`,
+      );
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to save step 2 assets.",
+      );
+    }
+  }
+
+  async function handleGenerateSubtitlesFromStep1() {
+    if (!videoFile || isGeneratingSrt) {
+      return;
+    }
+
+    setIsGeneratingSrt(true);
+    setErrorMessage("");
+    setStep1SrtMessage("");
+
+    try {
+      const formData = new FormData();
+      formData.append("video", videoFile);
+      formData.append("subtitleLanguage", "en");
+
+      const response = await fetch("/api/subtitles/generate", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json()) as Step1SubtitleResponse & { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || "Unable to generate subtitle file.");
+      }
+
+      const generatedSubtitle = new File(
+        [payload.content],
+        payload.filename || "subtitles.srt",
+        { type: "application/x-subrip; charset=utf-8" },
+      );
+      setSubtitleFile(generatedSubtitle);
+      setDraftId(payload.draftId || "");
+      setStep2SaveMessage("Step 1 subtitle and source video saved to backend.");
+      setStep1SrtMessage(`Generated subtitle file: ${generatedSubtitle.name}`);
+      setWizardStep(2);
+      setStatusMessage("Step 1 complete. Subtitle file has been loaded into Step 2.");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unable to generate subtitle file.",
+      );
+    } finally {
+      setIsGeneratingSrt(false);
     }
   }
 
@@ -254,421 +528,606 @@ export default function Home() {
         <section className="rounded-[2rem] border border-white/10 bg-[linear-gradient(160deg,rgba(255,255,255,0.1),rgba(255,255,255,0.04))] p-6">
           <p className="text-xs uppercase tracking-[0.24em] text-white/45">Pipeline</p>
 
-          <form onSubmit={handleRender} className="mt-5 grid gap-4">
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
-                <span className="text-sm text-white/80">Main video upload</span>
-                <input
-                  type="file"
-                  accept="video/*"
-                  onChange={(event) => setVideoFile(event.target.files?.[0] ?? null)}
-                  className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-orange-500 file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
-                />
-              </label>
-
-              <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
-                <span className="text-sm text-white/80">Logo upload (single logo)</span>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  onChange={(event) => setLogoFile(event.target.files?.[0] ?? null)}
-                  className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
-                />
-              </label>
-            </div>
-
-            <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-6">
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Background color</span>
-                <input
-                  type="color"
-                  value={backgroundColor}
-                  onChange={(event) => setBackgroundColor(event.target.value)}
-                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Text color</span>
-                <input
-                  type="color"
-                  value={textColor}
-                  onChange={(event) => setTextColor(event.target.value)}
-                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Accent color</span>
-                <input
-                  type="color"
-                  value={accentColor}
-                  onChange={(event) => setAccentColor(event.target.value)}
-                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Google font (30)</span>
-                <select
-                  value={fontChoice}
-                  onChange={(event) =>
-                    setFontChoice(event.target.value as (typeof googleFonts)[number])
-                  }
-                  className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                >
-                  {googleFonts.map((font) => (
-                    <option key={font} value={font}>
-                      {font}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Render quality</span>
-                <select
-                  value={qualityProfile}
-                  onChange={(event) =>
-                    setQualityProfile(event.target.value as "fast" | "balanced" | "high")
-                  }
-                  className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                >
-                  <option value="fast">Fast</option>
-                  <option value="balanced">Balanced</option>
-                  <option value="high">High (crispest)</option>
-                </select>
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Song choice</span>
-                <select
-                  value={soundtrackChoice}
-                  onChange={(event) =>
-                    setSoundtrackChoice(
-                      event.target.value as "startup-chime" | "spirited-blues",
-                    )
-                  }
-                  className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                >
-                  <option value="spirited-blues">Spirited Blues</option>
-                  <option value="startup-chime">Startup Chime</option>
-                </select>
-              </label>
-            </div>
-
-            <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-2">
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Intro title</span>
-                <input
-                  value={trailerTitle}
-                  onChange={(event) => setTrailerTitle(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Intro subtitle</span>
-                <input
-                  value={trailerSubtitle}
-                  onChange={(event) => setTrailerSubtitle(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Outro title</span>
-                <input
-                  value={trailerOutroTitle}
-                  onChange={(event) => setTrailerOutroTitle(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Outro subtitle</span>
-                <input
-                  value={trailerOutroSubtitle}
-                  onChange={(event) => setTrailerOutroSubtitle(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-              <label className="grid gap-2 md:col-span-2">
-                <span className="text-sm text-white/80">Intro/Outro duration (seconds)</span>
-                <input
-                  type="number"
-                  min="1.2"
-                  max="12"
-                  step="0.1"
-                  value={trailerDuration}
-                  onChange={(event) => setTrailerDuration(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-            </div>
-
-            <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-2">
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Lower third (bottom-right): line 1</span>
-                <input
-                  value={lowerThirdTitle}
-                  onChange={(event) => setLowerThirdTitle(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Lower third (bottom-right): line 2</span>
-                <input
-                  value={lowerThirdSubtitle}
-                  onChange={(event) => setLowerThirdSubtitle(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Lower third start (sec)</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={lowerThirdStart}
-                  onChange={(event) => setLowerThirdStart(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Lower third duration (sec)</span>
-                <input
-                  type="number"
-                  min="0.5"
-                  step="0.1"
-                  value={lowerThirdDuration}
-                  onChange={(event) => setLowerThirdDuration(event.target.value)}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                />
-              </label>
-            </div>
-
-            <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4">
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Enable subtitles</span>
-                <label className="inline-flex items-center gap-3 text-sm text-white/90">
-                  <input
-                    type="checkbox"
-                    checked={subtitlesEnabled}
-                    onChange={(event) => setSubtitlesEnabled(event.target.checked)}
-                    className="h-4 w-4 rounded border-white/30 bg-transparent accent-orange-500"
-                  />
-                  Burn subtitles into the final render
-                </label>
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle design preset</span>
-                <select
-                  value={subtitlePreset}
-                  onChange={(event) => {
-                    const nextPreset = event.target.value as SubtitlePreset;
-                    if (nextPreset === "custom") {
-                      setSubtitlePreset("custom");
-                      return;
-                    }
-                    applySubtitlePreset(nextPreset);
-                  }}
-                  className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white disabled:opacity-50"
-                  disabled={!subtitlesEnabled}
-                >
-                  {Object.entries(subtitlePresets).map(([value, preset]) => (
-                    <option key={value} value={value}>
-                      {preset.label}
-                    </option>
-                  ))}
-                  <option value="custom">Custom</option>
-                </select>
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle file (.srt / .vtt / .ass)</span>
-                <input
-                  type="file"
-                  accept=".srt,.vtt,.ass"
-                  onChange={(event) => {
-                    const uploadedFile = event.target.files?.[0] ?? null;
-                    setSubtitleFile(uploadedFile);
-                    setSubtitleAutoGenerate(uploadedFile ? false : true);
-                  }}
-                  className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black disabled:file:bg-white/50"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Auto-generate subtitles from audio</span>
-                <label className="inline-flex items-center gap-3 text-sm text-white/90">
-                  <input
-                    type="checkbox"
-                    checked={subtitleAutoGenerate}
-                    onChange={(event) => {
-                      if (!event.target.checked) {
-                        setSubtitleAutoGenerate(false);
-                        return;
-                      }
-
-                      setSubtitleAutoGenerate(true);
-                      setSubtitleFile(null);
-                    }}
-                    className="h-4 w-4 rounded border-white/30 bg-transparent accent-orange-500 disabled:opacity-50"
-                    disabled={!subtitlesEnabled || Boolean(subtitleFile)}
-                  />
-                  Uses OpenAI Whisper to transcribe the rendered timeline
-                </label>
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle font size</span>
-                <input
-                  type="number"
-                  min="16"
-                  max="110"
-                  step="1"
-                  value={subtitleFontSize}
-                  onChange={(event) => {
-                    markSubtitlePresetCustom();
-                    setSubtitleFontSize(event.target.value);
-                  }}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle outline width</span>
-                <input
-                  type="number"
-                  min="0"
-                  max="8"
-                  step="1"
-                  value={subtitleOutlineWidth}
-                  onChange={(event) => {
-                    markSubtitlePresetCustom();
-                    setSubtitleOutlineWidth(event.target.value);
-                  }}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle bottom margin</span>
-                <input
-                  type="number"
-                  min="20"
-                  max="220"
-                  step="1"
-                  value={subtitleMarginV}
-                  onChange={(event) => {
-                    markSubtitlePresetCustom();
-                    setSubtitleMarginV(event.target.value);
-                  }}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle shadow</span>
-                <input
-                  type="number"
-                  min="0"
-                  max="8"
-                  step="1"
-                  value={subtitleShadow}
-                  onChange={(event) => {
-                    markSubtitlePresetCustom();
-                    setSubtitleShadow(event.target.value);
-                  }}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle text color</span>
-                <input
-                  type="color"
-                  value={subtitleFontColor}
-                  onChange={(event) => {
-                    markSubtitlePresetCustom();
-                    setSubtitleFontColor(event.target.value);
-                  }}
-                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent disabled:opacity-50"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle outline color</span>
-                <input
-                  type="color"
-                  value={subtitleOutlineColor}
-                  onChange={(event) => {
-                    markSubtitlePresetCustom();
-                    setSubtitleOutlineColor(event.target.value);
-                  }}
-                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent disabled:opacity-50"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Subtitle caption box color</span>
-                <input
-                  type="color"
-                  value={subtitleBackgroundColor}
-                  onChange={(event) => {
-                    markSubtitlePresetCustom();
-                    setSubtitleBackgroundColor(event.target.value);
-                  }}
-                  className="h-11 w-full rounded-xl border border-white/15 bg-transparent disabled:opacity-50"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-
-              <label className="grid gap-2">
-                <span className="text-sm text-white/80">Caption box opacity (0-100)</span>
-                <input
-                  type="number"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={subtitleBackgroundOpacity}
-                  onChange={(event) => {
-                    markSubtitlePresetCustom();
-                    setSubtitleBackgroundOpacity(event.target.value);
-                  }}
-                  className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white disabled:bg-white/10"
-                  disabled={!subtitlesEnabled}
-                />
-              </label>
-            </div>
-
-            <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
-              Audio note: both choices are original synthesized tracks. No proprietary or
-              copyrighted Apple audio is used.
-            </div>
-
+          <div className="mt-5 grid gap-2 sm:grid-cols-4">
             <button
-              type="submit"
-              disabled={isSubmitting}
-              className="inline-flex h-12 items-center justify-center rounded-full bg-orange-500 px-6 text-sm font-semibold text-black transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-60"
+              type="button"
+              onClick={() => setWizardStep(1)}
+              className={`rounded-2xl border px-4 py-3 text-left text-sm transition ${
+                wizardStep === 1
+                  ? "border-orange-300/70 bg-orange-400/15 text-white"
+                  : "border-white/10 bg-black/20 text-white/70 hover:bg-black/30"
+              }`}
             >
-              {isSubmitting ? "Rendering..." : "Render Trailer Video"}
+              Step 1: Source Video
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (videoFile || draftId) {
+                  setWizardStep(2);
+                }
+              }}
+              className={`rounded-2xl border px-4 py-3 text-left text-sm transition ${
+                wizardStep === 2
+                  ? "border-orange-300/70 bg-orange-400/15 text-white"
+                  : "border-white/10 bg-black/20 text-white/70 hover:bg-black/30"
+              } ${videoFile || draftId ? "" : "cursor-not-allowed opacity-60"}`}
+            >
+              Step 2: Subtitles + Branding
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (videoFile || draftId) {
+                  setWizardStep(3);
+                }
+              }}
+              className={`rounded-2xl border px-4 py-3 text-left text-sm transition ${
+                wizardStep === 3
+                  ? "border-orange-300/70 bg-orange-400/15 text-white"
+                  : "border-white/10 bg-black/20 text-white/70 hover:bg-black/30"
+              } ${videoFile || draftId ? "" : "cursor-not-allowed opacity-60"}`}
+            >
+              Step 3: Render + Export
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (result) {
+                  setWizardStep(4);
+                }
+              }}
+              className={`rounded-2xl border px-4 py-3 text-left text-sm transition ${
+                wizardStep === 4
+                  ? "border-orange-300/70 bg-orange-400/15 text-white"
+                  : "border-white/10 bg-black/20 text-white/70 hover:bg-black/30"
+              } ${result ? "" : "cursor-not-allowed opacity-60"}`}
+            >
+              Step 4: Preview + Download
+            </button>
+          </div>
+
+          <form onSubmit={handleRender} className="mt-5 grid gap-4">
+            {wizardStep === 1 ? (
+              <>
+                <div className="grid gap-4">
+                  <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <span className="text-sm text-white/80">Main video upload</span>
+                    <input
+                      type="file"
+                      accept="video/*"
+                      onChange={(event) => {
+                        setVideoFile(event.target.files?.[0] ?? null);
+                        setSubtitleFile(null);
+                        setDraftId("");
+                        setStep2SaveMessage("");
+                        setStep1SrtMessage("");
+                      }}
+                      className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-orange-500 file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
+                    />
+                  </label>
+                  <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <span className="text-sm text-white/80">Output format</span>
+                    <select
+                      value={videoFormat}
+                      onChange={(event) =>
+                        setVideoFormat(event.target.value as "short" | "wide")
+                      }
+                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
+                    >
+                      <option value="short">Short (9:16, TikTok/Reels)</option>
+                      <option value="wide">Wide (16:9, YouTube landscape)</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleGenerateSubtitlesFromStep1}
+                    disabled={!videoFile || isGeneratingSrt}
+                    className="inline-flex h-12 items-center justify-center rounded-full border border-emerald-300/50 bg-emerald-400/15 px-6 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/25 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isGeneratingSrt ? "Generating .srt..." : "Run speech-to-text (.srt)"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(2)}
+                    disabled={!videoFile && !draftId}
+                    className="inline-flex h-12 items-center justify-center rounded-full bg-orange-500 px-6 text-sm font-semibold text-black transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Continue to Step 2
+                  </button>
+                </div>
+                {step1SrtMessage ? (
+                  <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-4 text-sm text-emerald-100">
+                    {step1SrtMessage}
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+
+            {wizardStep === 2 ? (
+              <>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <span className="text-sm text-white/80">Logo upload (.svg only for crisp quality)</span>
+                    <input
+                      type="file"
+                      accept="image/svg+xml,.svg"
+                      onChange={(event) => {
+                        const nextLogo = event.target.files?.[0] ?? null;
+                        setLogoFile(nextLogo);
+                        void persistDraftAssets({ logoFile: nextLogo });
+                      }}
+                      className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
+                    />
+                  </label>
+
+                  <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <span className="text-sm text-white/80">Subtitle file upload (.srt)</span>
+                    <input
+                      ref={subtitleInputRef}
+                      type="file"
+                      accept=".srt,text/plain"
+                      onChange={(event) => {
+                        const nextSubtitle = event.target.files?.[0] ?? null;
+                        setSubtitleFile(nextSubtitle);
+                        void persistDraftAssets({ subtitleFile: nextSubtitle });
+                      }}
+                      className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-emerald-300 file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
+                    />
+                  </label>
+                </div>
+
+                {subtitleFile ? (
+                  <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-3 text-xs text-emerald-100">
+                    Active subtitle file: {subtitleFile.name}
+                  </div>
+                ) : null}
+                {draftId ? (
+                  <div className="rounded-2xl border border-white/15 bg-black/20 p-3 text-xs text-white/75">
+                    Backend draft: {draftId}
+                  </div>
+                ) : null}
+                {step2SaveMessage ? (
+                  <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-3 text-xs text-emerald-100">
+                    {step2SaveMessage}
+                  </div>
+                ) : null}
+
+                <div className="grid gap-4 rounded-2xl border border-emerald-300/25 bg-emerald-400/10 p-4 md:grid-cols-2">
+                  <label className="grid gap-2">
+                    <span className="text-sm text-emerald-100">Subtitle font (30 options)</span>
+                    <select
+                      value={subtitleFontChoice}
+                      onChange={(event) =>
+                        setSubtitleFontChoice(
+                          event.target.value as (typeof googleFonts)[number],
+                        )
+                      }
+                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
+                    >
+                      {googleFonts.map((font) => (
+                        <option key={font} value={font}>
+                          {font}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="grid gap-2">
+                    <span className="text-sm text-emerald-100">Subtitle highlighter color</span>
+                    <input
+                      type="color"
+                      value={subtitleHighlightColor}
+                      onChange={(event) => setSubtitleHighlightColor(event.target.value)}
+                      className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
+                    />
+                  </label>
+                </div>
+
+                <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-6">
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Background color</span>
+                    <input
+                      type="color"
+                      value={backgroundColor}
+                      onChange={(event) => setBackgroundColor(event.target.value)}
+                      className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
+                    />
+                  </label>
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Text color</span>
+                    <input
+                      type="color"
+                      value={textColor}
+                      onChange={(event) => setTextColor(event.target.value)}
+                      className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
+                    />
+                  </label>
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Accent color</span>
+                    <input
+                      type="color"
+                      value={accentColor}
+                      onChange={(event) => setAccentColor(event.target.value)}
+                      className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
+                    />
+                  </label>
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Google font (30)</span>
+                    <select
+                      value={fontChoice}
+                      onChange={(event) =>
+                        setFontChoice(event.target.value as (typeof googleFonts)[number])
+                      }
+                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
+                    >
+                      {googleFonts.map((font) => (
+                        <option key={font} value={font}>
+                          {font}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Render quality</span>
+                    <select
+                      value={qualityProfile}
+                      onChange={(event) =>
+                        setQualityProfile(event.target.value as "fast" | "balanced" | "high")
+                      }
+                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
+                    >
+                      <option value="fast">Fast</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="high">High (crispest)</option>
+                    </select>
+                  </label>
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Intro/outro song</span>
+                    <select
+                      value={soundtrackChoice}
+                      onChange={(event) =>
+                        setSoundtrackChoice(
+                          event.target.value as
+                            | "startup-chime"
+                            | "spirited-blues"
+                            | "theater-chime"
+                            | "trailer-braam"
+                            | "piano-lift",
+                        )
+                      }
+                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
+                    >
+                      <option value="theater-chime">Theater Chime (cinema)</option>
+                      <option value="trailer-braam">Trailer Braam (epic)</option>
+                      <option value="piano-lift">Piano Lift (emotional)</option>
+                      <option value="spirited-blues">Spirited Blues</option>
+                      <option value="startup-chime">Startup Chime</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
+                  Subtitle pipeline mode: Step 3 extracts audio, transcribes speech, generates
+                  `.srt`, and burns subtitles directly into the video.
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(1)}
+                    className="inline-flex h-12 items-center justify-center rounded-full border border-white/20 bg-transparent px-6 text-sm font-semibold text-white transition hover:bg-white/10"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(3)}
+                    className="inline-flex h-12 items-center justify-center rounded-full bg-orange-500 px-6 text-sm font-semibold text-black transition hover:bg-orange-400"
+                  >
+                    Continue to Step 3
+                  </button>
+                </div>
+              </>
+            ) : null}
+
+            {wizardStep === 3 ? (
+              <>
+                <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-2">
+                  <label className="inline-flex items-start gap-3 rounded-2xl border border-white/10 bg-black/20 p-4 md:col-span-2">
+                    <input
+                      type="checkbox"
+                      checked={generateTrailerIntroOutro}
+                      onChange={(event) => {
+                        const enabled = event.target.checked;
+                        setGenerateTrailerIntroOutro(enabled);
+                        if (!enabled) {
+                          setIntroMusicFile(null);
+                          setOutroMusicFile(null);
+                        }
+                      }}
+                      className="mt-1 h-4 w-4 rounded border-white/30 bg-transparent accent-orange-500"
+                    />
+                    <span className="text-sm text-white/90">
+                      Generate cinematic intro and outro clips (turn off to reduce render time)
+                    </span>
+                  </label>
+                  {generateTrailerIntroOutro ? (
+                    <>
+                      <label className="grid gap-2">
+                        <span className="text-sm text-white/80">Intro title</span>
+                        <input
+                          value={trailerTitle}
+                          onChange={(event) => setTrailerTitle(event.target.value)}
+                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                        />
+                      </label>
+                      <label className="grid gap-2">
+                        <span className="text-sm text-white/80">Intro line 2</span>
+                        <input
+                          value={trailerSubtitle}
+                          onChange={(event) => setTrailerSubtitle(event.target.value)}
+                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                        />
+                      </label>
+                      <label className="grid gap-2">
+                        <span className="text-sm text-white/80">Outro title</span>
+                        <input
+                          value={trailerOutroTitle}
+                          onChange={(event) => setTrailerOutroTitle(event.target.value)}
+                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                        />
+                      </label>
+                      <label className="grid gap-2">
+                        <span className="text-sm text-white/80">Outro line 2</span>
+                        <input
+                          value={trailerOutroSubtitle}
+                          onChange={(event) => setTrailerOutroSubtitle(event.target.value)}
+                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                        />
+                      </label>
+                      <label className="grid gap-2 md:col-span-2">
+                        <span className="text-sm text-white/80">
+                          Outro credits (one name per line)
+                        </span>
+                        <textarea
+                          value={outroCredits}
+                          onChange={(event) => setOutroCredits(event.target.value)}
+                          rows={4}
+                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                        />
+                      </label>
+                      <label className="grid gap-2 md:col-span-2">
+                        <span className="text-sm text-white/80">
+                          Intro/Outro duration (seconds)
+                        </span>
+                        <input
+                          type="number"
+                          min="1.2"
+                          max="12"
+                          step="0.1"
+                          value={trailerDuration}
+                          onChange={(event) => setTrailerDuration(event.target.value)}
+                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                        />
+                      </label>
+                      <label className="grid gap-2">
+                        <span className="text-sm text-white/80">
+                          Intro music upload (optional, overrides song list)
+                        </span>
+                        <input
+                          type="file"
+                          accept="audio/*"
+                          onChange={(event) => setIntroMusicFile(event.target.files?.[0] ?? null)}
+                          className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
+                        />
+                      </label>
+                      <label className="grid gap-2">
+                        <span className="text-sm text-white/80">
+                          Outro music upload (optional, overrides song list)
+                        </span>
+                        <input
+                          type="file"
+                          accept="audio/*"
+                          onChange={(event) => setOutroMusicFile(event.target.files?.[0] ?? null)}
+                          className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-sm text-white/70 md:col-span-2">
+                      Intro/outro clip customization is hidden while cinematic intro/outro is off.
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-2">
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Lower third (bottom-right): line 1</span>
+                    <input
+                      value={lowerThirdTitle}
+                      onChange={(event) => setLowerThirdTitle(event.target.value)}
+                      className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                    />
+                  </label>
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Lower third (bottom-right): line 2</span>
+                    <input
+                      value={lowerThirdSubtitle}
+                      onChange={(event) => setLowerThirdSubtitle(event.target.value)}
+                      className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                    />
+                  </label>
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Lower third start (sec)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={lowerThirdStart}
+                      onChange={(event) => setLowerThirdStart(event.target.value)}
+                      className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                    />
+                  </label>
+                  <label className="grid gap-2">
+                    <span className="text-sm text-white/80">Lower third duration (sec)</span>
+                    <input
+                      type="number"
+                      min="0.5"
+                      step="0.1"
+                      value={lowerThirdDuration}
+                      onChange={(event) => setLowerThirdDuration(event.target.value)}
+                      className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
+                    />
+                  </label>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
+                  Step 3 runs the render and then lets you download or save output files to your
+                  Mac safe folder.
+                </div>
+                <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-4 text-sm text-emerald-100">
+                  Subtitle burn style: {subtitleFontChoice}, Apple-style size{" "}
+                  {appleSubtitleFontSize}px, highlight {subtitleHighlightColor}.
+                </div>
+                <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-4">
+                  <label className="grid gap-2">
+                    <span className="text-sm font-medium text-emerald-100">
+                      Render speed mode
+                    </span>
+                    <select
+                      value={renderSpeedMode}
+                      onChange={(event) =>
+                        setRenderSpeedMode(
+                          event.target.value as "turbo" | "balanced" | "quality",
+                        )
+                      }
+                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
+                    >
+                      <option value="turbo">Turbo (fastest, hardware encode)</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="quality">Quality</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(2)}
+                    className="inline-flex h-12 items-center justify-center rounded-full border border-white/20 bg-transparent px-6 text-sm font-semibold text-white transition hover:bg-white/10"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="inline-flex h-12 items-center justify-center rounded-full bg-orange-500 px-6 text-sm font-semibold text-black transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isSubmitting ? "Rendering..." : "Render Trailer Video"}
+                  </button>
+                </div>
+                {result ? (
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(4)}
+                    className="inline-flex h-12 w-fit items-center justify-center rounded-full border border-emerald-300/50 bg-emerald-400/15 px-6 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/25"
+                  >
+                    Open Step 4 Preview
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+
+            {wizardStep === 4 ? (
+              <>
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <p className="text-sm text-white/85">
+                    Preview the rendered video before downloading. If changes are needed, go back
+                    to Step 2 or Step 3.
+                  </p>
+                </div>
+
+                {result?.previewUrl ? (
+                  <div className="overflow-hidden rounded-2xl border border-white/15 bg-black/40">
+                    <video
+                      key={result.jobId}
+                      controls
+                      preload="metadata"
+                      className="h-auto w-full"
+                      src={result.previewUrl}
+                    />
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-5 text-sm text-white/70">
+                    Render a video in Step 3 first, then preview it here.
+                  </div>
+                )}
+
+                {result ? (
+                  <div className="grid gap-3 sm:grid-cols-1">
+                    <a
+                      className="inline-flex h-11 items-center justify-center rounded-full bg-white px-5 text-sm font-semibold text-black transition hover:bg-orange-100"
+                      href={result.downloadUrl}
+                    >
+                      Download video
+                    </a>
+                  </div>
+                ) : null}
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(2)}
+                    className="inline-flex h-11 items-center justify-center rounded-full border border-white/20 bg-transparent px-5 text-sm font-semibold text-white transition hover:bg-white/10"
+                  >
+                    Back to Step 2
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWizardStep(3)}
+                    className="inline-flex h-11 items-center justify-center rounded-full border border-white/20 bg-transparent px-5 text-sm font-semibold text-white transition hover:bg-white/10"
+                  >
+                    Back to Step 3
+                  </button>
+                </div>
+              </>
+            ) : null}
           </form>
         </section>
 
         <section className="rounded-[2rem] border border-white/10 bg-black/25 p-6">
           <p className="text-xs uppercase tracking-[0.24em] text-white/45">Export</p>
 
-          <div className="mt-5 rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-5 text-sm leading-7 text-white/75">
-            {statusMessage}
-          </div>
+          {renderStatus ? (
+            <div className="mt-5 space-y-3 rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-5">
+              <div className="flex items-center justify-between text-sm uppercase tracking-[0.12em] text-white/70">
+                <span>Render {renderStatus.status}</span>
+                <span>{renderStatus.progress}%</span>
+              </div>
+              <p className="text-sm text-white/85">{renderStatus.message}</p>
+              <div className="h-2.5 w-full overflow-hidden rounded-full bg-white/15">
+                <div
+                  className={`h-full rounded-full transition-all ${
+                    renderStatus.status === "failed"
+                      ? "bg-red-400"
+                      : "bg-gradient-to-r from-orange-400 to-emerald-300"
+                  }`}
+                  style={{ width: `${renderStatus.progress}%` }}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="mt-5 rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-5 text-sm leading-7 text-white/75">
+              {statusMessage}
+            </div>
+          )}
 
           {errorMessage ? (
             <div className="mt-4 rounded-2xl border border-red-400/30 bg-red-400/12 p-4 text-sm leading-7 text-red-100">
@@ -691,6 +1150,26 @@ export default function Home() {
               >
                 Download final video
               </a>
+              <button
+                type="button"
+                onClick={handleSaveToMac}
+                disabled={isSavingToMac}
+                className="inline-flex w-full items-center justify-center rounded-full border border-emerald-300/50 bg-emerald-400/15 px-6 py-3 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSavingToMac
+                  ? "Saving to Mac safe folder..."
+                  : "Step 3: Save files to Mac safe folder"}
+              </button>
+              {savedToMacPath ? (
+                <p className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-3 text-xs leading-6 text-emerald-100">
+                  Saved to: {savedToMacPath}
+                </p>
+              ) : null}
+              {saveToMacError ? (
+                <p className="rounded-2xl border border-red-400/30 bg-red-400/12 p-3 text-xs leading-6 text-red-100">
+                  {saveToMacError}
+                </p>
+              ) : null}
             </div>
           ) : null}
         </section>

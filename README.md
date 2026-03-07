@@ -14,22 +14,32 @@ pnpm dev
 bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3004](http://localhost:3004) with your browser to see the result.
 
-## Automatic subtitle transcription
+## Speech To Text Subtitles
 
-Auto-captioning uses OpenAI Whisper and requires an OpenAI API key.
+Rendering now includes a speech-to-text pipeline:
 
-1. Create an API key at [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys).
-2. Create `.env.local` in the project root with:
+1. Extract audio from the rendered timeline.
+2. Run speech recognition with a local Vosk engine.
+3. Generate an `.srt` subtitle file.
+4. Keep subtitles as a separate downloadable file.
+
+If you upload an `.srt` file in the UI, that file is used instead of auto-transcription.
+
+Setup:
 
 ```bash
-OPENAI_API_KEY=sk-...
+python3 -m pip install --user vosk
 ```
 
-3. Restart the dev server.
+Download a Vosk model (for example from `alphacephei.com/vosk/models`) and set this in `.env.local`:
 
-With this set, keep `Auto-generate subtitles from audio` enabled in the UI and the pipeline will transcribe the final stitched timeline, then burn captions into the output.
+```bash
+VOSK_MODEL_PATH=/absolute/path/to/vosk-model-small-en-us
+```
+
+If you upload an `.srt` file in the UI, transcription is skipped and `VOSK_MODEL_PATH` is not required for that render.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
