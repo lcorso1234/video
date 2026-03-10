@@ -1,6 +1,5 @@
 const { spawn } = require("node:child_process");
 const ffmpegPath = require("ffmpeg-static");
-const ffprobe = require("ffprobe-static");
 
 function runCommand(bin, args) {
   return new Promise((resolve, reject) => {
@@ -25,9 +24,6 @@ function runCommand(bin, args) {
 function assertBinaries() {
   if (!ffmpegPath) {
     throw new Error("ffmpeg-static binary unavailable.");
-  }
-  if (!ffprobe?.path) {
-    throw new Error("ffprobe-static binary unavailable.");
   }
 }
 
@@ -80,7 +76,6 @@ function getSubtitleStyle({
 
 module.exports = {
   ffmpegPath,
-  ffprobePath: ffprobe.path,
   runCommand,
   assertBinaries,
   escapeSubtitlesPath,

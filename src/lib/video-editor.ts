@@ -5,7 +5,6 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import ffmpegPath from "ffmpeg-static";
-import ffprobe from "ffprobe-static";
 
 export type RenderVideoInput = {
   sourceVideo: File;
@@ -256,7 +255,6 @@ const googleFontToCategory: Record<string, keyof typeof fontCategoryCandidates> 
 
 function assertBinaries() {
   getFfmpegBinaryPath();
-  getFfprobeBinaryPath();
 }
 
 function getFfmpegBinaryPath(): string {
@@ -265,14 +263,6 @@ function getFfmpegBinaryPath(): string {
   }
 
   return ffmpegPath;
-}
-
-function getFfprobeBinaryPath(): string {
-  if (!ffprobe.path) {
-    throw new Error("FFprobe binary is unavailable.");
-  }
-
-  return ffprobe.path;
 }
 
 function makeEven(value: number, fallback: number) {
@@ -489,22 +479,6 @@ async function writeRenderJobStatus(
   };
 
   await writeFile(getJobStatusPath(jobId), `${JSON.stringify(status)}\n`);
-}
-
-function parseFraction(value?: string) {
-  if (!value) {
-    return defaultFps;
-  }
-
-  const [numerator, denominator] = value.split("/");
-  const top = Number(numerator);
-  const bottom = Number(denominator);
-
-  if (!Number.isFinite(top) || !Number.isFinite(bottom) || bottom === 0) {
-    return defaultFps;
-  }
-
-  return top / bottom;
 }
 
 function clampFrameRate(value: number) {
@@ -1324,86 +1298,51 @@ async function runCommand(binary: string, args: string[]) {
   });
 }
 
-async function runJsonCommand(binary: string, args: string[]) {
-  return await new Promise<Record<string, unknown>>((resolve, reject) => {
-    const child = spawn(binary, args, {
-      stdio: ["ignore", "pipe", "pipe"],
+async function probeMedia(filePath: string): Promise<MediaInfo> {
+  const probeOutput = await new Promise<string>((resolve, reject) => {
+    const child = spawn(getFfmpegBinaryPath(), ["-hide_banner", "-i", filePath], {
+      stdio: ["ignore", "ignore", "pipe"],
     });
 
-    let stdout = "";
     let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-
     child.on("error", reject);
-
     child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `Command failed with exit code ${code}.`));
+      const probeFooter = /At least one output file must be specified/i;
+      if (code === 0 || probeFooter.test(stderr)) {
+        resolve(stderr);
         return;
       }
-
-      try {
-        resolve(JSON.parse(stdout) as Record<string, unknown>);
-      } catch (error) {
-        reject(error);
-      }
+      reject(new Error(stderr.trim() || `FFmpeg probe failed with exit code ${code}.`));
     });
   });
-}
 
-async function probeMedia(filePath: string): Promise<MediaInfo> {
-  const raw = await runJsonCommand(getFfprobeBinaryPath(), [
-    "-v",
-    "error",
-    "-print_format",
-    "json",
-    "-show_streams",
-    "-show_format",
-    filePath,
-  ]);
+  const videoLine =
+    probeOutput
+      .split(/\r?\n/)
+      .find((line) => /^\s*Stream #.*Video:/i.test(line))
+      ?.trim() || "";
 
-  const streams = Array.isArray(raw.streams) ? raw.streams : [];
-  const videoStream = streams.find((stream) => {
-    return (
-      typeof stream === "object" &&
-      stream !== null &&
-      "codec_type" in stream &&
-      stream.codec_type === "video"
-    );
-  }) as
-    | {
-        width?: number;
-        height?: number;
-        r_frame_rate?: string;
-      }
-    | undefined;
+  const dimensions = /(\d{2,5})x(\d{2,5})/.exec(videoLine);
+  const fpsMatch =
+    /(\d+(?:\.\d+)?)\s*(?:fps|tbr)\b/i.exec(videoLine) ||
+    /(\d+(?:\.\d+)?)\s*fps\b/i.exec(probeOutput);
+  const durationMatch = /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/i.exec(probeOutput);
+  const hasAudio = /Stream #.*Audio:/i.test(probeOutput);
 
-  const hasAudio = streams.some((stream) => {
-    return (
-      typeof stream === "object" &&
-      stream !== null &&
-      "codec_type" in stream &&
-      stream.codec_type === "audio"
-    );
-  });
-
-  const formatInfo =
-    typeof raw.format === "object" && raw.format !== null
-      ? (raw.format as { duration?: string | number })
-      : {};
+  const durationSeconds = durationMatch
+    ? Number(durationMatch[1]) * 3600 +
+      Number(durationMatch[2]) * 60 +
+      parseDurationSeconds(durationMatch[3])
+    : 0;
 
   return {
-    width: makeEven(videoStream?.width ?? fallbackWidth, fallbackWidth),
-    height: makeEven(videoStream?.height ?? fallbackHeight, fallbackHeight),
-    fps: clampFrameRate(parseFraction(videoStream?.r_frame_rate)),
-    duration: parseDurationSeconds(formatInfo.duration),
+    width: makeEven(dimensions ? Number(dimensions[1]) : fallbackWidth, fallbackWidth),
+    height: makeEven(dimensions ? Number(dimensions[2]) : fallbackHeight, fallbackHeight),
+    fps: clampFrameRate(fpsMatch ? Number(fpsMatch[1]) : defaultFps),
+    duration: durationSeconds,
     hasAudio,
   };
 }
