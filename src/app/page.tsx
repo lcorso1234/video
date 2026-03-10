@@ -49,6 +49,102 @@ type RenderResponse = {
 type AppPhase = 1 | 2 | 3;
 
 const INTRO_OUTRO_BACKGROUND = "#6f7b86";
+const ACCEPTED_LOGO_TYPES = new Set([
+  "image/svg+xml",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+
+const ACCEPTED_LOGO_EXTENSIONS = [".svg", ".png", ".jpg", ".jpeg", ".webp"];
+
+function hasAcceptedLogoExtension(filename: string) {
+  const lower = filename.toLowerCase();
+  return ACCEPTED_LOGO_EXTENSIONS.some((extension) => lower.endsWith(extension));
+}
+
+function isSvgLogoFile(file: File) {
+  return file.type === "image/svg+xml" || file.name.toLowerCase().endsWith(".svg");
+}
+
+function isAcceptedLogoFile(file: File) {
+  return ACCEPTED_LOGO_TYPES.has(file.type) || hasAcceptedLogoExtension(file.name);
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Unable to read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElement(file: File) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Unable to decode image."));
+    };
+    image.src = objectUrl;
+  });
+}
+
+async function extractRasterPalette(file: File) {
+  const image = await loadImageElement(file);
+  const sampleWidth = Math.max(1, Math.min(96, image.naturalWidth || image.width || 96));
+  const sampleHeight = Math.max(1, Math.min(96, image.naturalHeight || image.height || 96));
+  const canvas = document.createElement("canvas");
+  canvas.width = sampleWidth;
+  canvas.height = sampleHeight;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    return [];
+  }
+
+  context.drawImage(image, 0, 0, sampleWidth, sampleHeight);
+  const { data } = context.getImageData(0, 0, sampleWidth, sampleHeight);
+  const counts = new Map<string, number>();
+
+  for (let index = 0; index < data.length; index += 4) {
+    const alpha = data[index + 3];
+    if (alpha < 24) {
+      continue;
+    }
+
+    const red = Math.round(data[index] / 16) * 16;
+    const green = Math.round(data[index + 1] / 16) * 16;
+    const blue = Math.round(data[index + 2] / 16) * 16;
+    const hex = rgbToHex(red, green, blue);
+    counts.set(hex, (counts.get(hex) || 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .sort((left, right) => right[1] - left[1])
+    .map(([hex]) => hex)
+    .slice(0, 8);
+}
+
+async function convertRasterLogoToSvg(file: File) {
+  const image = await loadImageElement(file);
+  const width = Math.max(1, image.naturalWidth || image.width || 512);
+  const height = Math.max(1, image.naturalHeight || image.height || 512);
+  const rasterPalette = await extractRasterPalette(file);
+  const paletteNote =
+    rasterPalette.length > 0 ? `\n  <desc>palette:${rasterPalette.join(",")}</desc>` : "";
+  const dataUrl = await readFileAsDataUrl(file);
+  const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">${paletteNote}
+  <image href="${dataUrl}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet" />
+</svg>`;
+  const baseName = stripFileExtension(file.name || "logo");
+  return new File([svgMarkup], `${baseName || "logo"}.svg`, { type: "image/svg+xml" });
+}
 
 function stripFileExtension(filename: string) {
   return filename.replace(/\.[^/.]+$/, "");
@@ -148,7 +244,7 @@ export default function Home() {
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState(
-    "Phase 1: upload SVG logo and confirm preview.",
+    "Phase 1: upload a logo image and confirm preview.",
   );
   const [errorMessage, setErrorMessage] = useState("");
   const [activeRenderJobId, setActiveRenderJobId] = useState<string | null>(null);
@@ -203,7 +299,7 @@ export default function Home() {
         setLogoPaletteError(
           palette.length
             ? ""
-            : "No usable brand colors were found in this SVG. Use an SVG with explicit fill/stroke colors.",
+            : "No usable brand colors were found in this logo. Try a higher-contrast image or SVG.",
         );
       } catch {
         if (cancelled) {
@@ -211,7 +307,7 @@ export default function Home() {
         }
         setLogoPalette([]);
         setSubtitleHighlightColor("");
-        setLogoPaletteError("Unable to read SVG colors.");
+        setLogoPaletteError("Unable to read logo colors.");
       }
     }
 
@@ -413,7 +509,7 @@ export default function Home() {
     event.preventDefault();
 
     if (!logoFile) {
-      setErrorMessage("Upload an SVG logo in phase 1 first.");
+      setErrorMessage("Upload a logo in phase 1 first.");
       setActivePhase(1);
       return;
     }
@@ -554,34 +650,47 @@ export default function Home() {
             <p className="text-xs uppercase tracking-[0.2em] text-[#94a1ac]">Phase 1</p>
             <h2 className="mt-1 text-xl font-semibold">Intro & Outro Maker</h2>
             <p className="mt-2 text-sm text-[#b8c3cb]">
-              One option only: SVG logo fades from white to full color on background
+              Logo fades from white to full color on background
               <span className="font-semibold text-[#e6edf1]"> {INTRO_OUTRO_BACKGROUND}</span>.
             </p>
 
             <div className="mt-4 grid gap-4 md:grid-cols-2">
               <label className="grid gap-2 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
-                <span className="text-sm text-[#d6dde2]">Upload logo (.svg)</span>
+                <span className="text-sm text-[#d6dde2]">Upload logo (.svg, .png, .jpg, .webp)</span>
                 <input
                   type="file"
-                  accept="image/svg+xml,.svg"
-                  onChange={(event) => {
+                  accept="image/svg+xml,image/png,image/jpeg,image/webp,.svg,.png,.jpg,.jpeg,.webp"
+                  onChange={async (event) => {
                     const nextFile = event.target.files?.[0] ?? null;
                     if (nextFile) {
-                      const lower = nextFile.name.toLowerCase();
-                      const isSvg = nextFile.type === "image/svg+xml" || lower.endsWith(".svg");
-                      if (!isSvg) {
+                      if (!isAcceptedLogoFile(nextFile)) {
                         setLogoFile(null);
-                        setErrorMessage("Logo must be an SVG file (.svg).");
+                        setErrorMessage("Logo must be .svg, .png, .jpg/.jpeg, or .webp.");
+                        return;
+                      }
+                    }
+
+                    let processedFile: File | null = nextFile;
+                    if (nextFile && !isSvgLogoFile(nextFile)) {
+                      try {
+                        processedFile = await convertRasterLogoToSvg(nextFile);
+                      } catch {
+                        setLogoFile(null);
+                        setErrorMessage("Unable to convert logo image to SVG.");
                         return;
                       }
                     }
 
                     setErrorMessage("");
-                    setLogoFile(nextFile);
+                    setLogoFile(processedFile);
                     setVideoFile(null);
                     setResult(null);
                     setRenderStatus(null);
-                    setStatusMessage("Phase 1 ready. Review the preview, then continue to phase 2.");
+                    setStatusMessage(
+                      nextFile && !isSvgLogoFile(nextFile)
+                        ? "Phase 1 ready. Image logo converted to SVG for intro/outro rendering."
+                        : "Phase 1 ready. Review the preview, then continue to phase 2.",
+                    );
                     setActivePhase(1);
                   }}
                   className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#aab6bf] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[#161d22]"
@@ -614,7 +723,7 @@ export default function Home() {
                             />
                           </div>
                         ) : (
-                          <span className="text-xs text-[#d7dee3]/80">Upload SVG to preview</span>
+                          <span className="text-xs text-[#d7dee3]/80">Upload logo to preview</span>
                         )}
                       </div>
                     </div>
@@ -645,7 +754,7 @@ export default function Home() {
                 </div>
               ) : (
                 <p className="mt-2 text-xs text-[#a8b4be]">
-                  Upload SVG to extract available brand colors.
+                  Upload a logo to extract available brand colors.
                 </p>
               )}
               {subtitleHighlightColor ? (
@@ -666,7 +775,7 @@ export default function Home() {
                 onClick={() => {
                   if (!phase1Complete) {
                     setErrorMessage(
-                      logoPaletteError || "Upload an SVG logo with usable brand colors first.",
+                      logoPaletteError || "Upload a logo with usable brand colors first.",
                     );
                     return;
                   }

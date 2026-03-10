@@ -13,6 +13,13 @@ export const runtime = "nodejs";
 const DEFAULT_SUBTITLE_FONT_SIZE = 48;
 const DEFAULT_SUBTITLE_HIGHLIGHT_COLOR = "#E6FF00";
 const DEFAULT_SUBTITLE_TEXT_COLOR = "#ffffff";
+const LOGO_ALLOWED_MIME_TYPES = new Set([
+  "image/svg+xml",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+const LOGO_ALLOWED_EXTENSIONS = [".svg", ".png", ".jpg", ".jpeg", ".webp"];
 
 type PipelineJobInput = {
   sourceVideo: File;
@@ -85,19 +92,55 @@ function getOptionalFile(value: FormDataEntryValue | null) {
   return value;
 }
 
-function validateLogoSvgFile(file: File | null) {
+function hasLogoExtension(filename: string) {
+  const lower = filename.toLowerCase();
+  return LOGO_ALLOWED_EXTENSIONS.some((extension) => lower.endsWith(extension));
+}
+
+function inferLogoMime(file: File) {
+  if (LOGO_ALLOWED_MIME_TYPES.has(file.type)) {
+    return file.type;
+  }
+
+  const lower = file.name.toLowerCase();
+  if (lower.endsWith(".svg")) {
+    return "image/svg+xml";
+  }
+  if (lower.endsWith(".png")) {
+    return "image/png";
+  }
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (lower.endsWith(".webp")) {
+    return "image/webp";
+  }
+  return "";
+}
+
+async function normalizeLogoFile(file: File | null) {
   if (!file) {
     return null;
   }
 
-  const name = file.name.toLowerCase();
-  const isSvgType = file.type === "image/svg+xml";
-  const isSvgExt = name.endsWith(".svg");
-  if (!isSvgType && !isSvgExt) {
-    throw new Error("Logo must be an SVG file (.svg) for crisp output.");
+  const mimeType = inferLogoMime(file);
+  if (!mimeType && !hasLogoExtension(file.name)) {
+    throw new Error("Logo must be .svg, .png, .jpg/.jpeg, or .webp.");
   }
 
-  return file;
+  if (mimeType === "image/svg+xml") {
+    return file;
+  }
+
+  const bytes = await file.arrayBuffer();
+  const base64 = Buffer.from(bytes).toString("base64");
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000">
+  <image href="${dataUrl}" width="1000" height="1000" preserveAspectRatio="xMidYMid meet" />
+</svg>`;
+
+  const baseName = (file.name || "logo").replace(/\.[^/.]+$/, "") || "logo";
+  return new File([svgMarkup], `${baseName}.svg`, { type: "image/svg+xml" });
 }
 
 function getSoundtrackChoice(
@@ -251,7 +294,7 @@ export async function POST(request: Request) {
     const clonedVideo = new File([await sourceVideo.arrayBuffer()], sourceVideo.name || "source.mp4", {
       type: sourceVideo.type || "video/mp4",
     });
-    const rawLogo = validateLogoSvgFile(
+    const rawLogo = await normalizeLogoFile(
       getOptionalFile(formData.get("logo")) || draftInput?.logoFile || null,
     );
     const rawIntroMusic = getOptionalFile(formData.get("introMusic"));
