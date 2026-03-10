@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { renderVideo } from "@/lib/video-editor";
+import { renderVideo, resolveRenderInputFromDraft } from "@/lib/video-editor";
+import {
+  getYouTubeConnectionStatus,
+  isYouTubeConfigured,
+  uploadVideoToYouTube,
+  writeYouTubePublishStatus,
+  type YouTubePrivacyStatus,
+} from "@/lib/youtube";
 
 export const runtime = "nodejs";
 const DEFAULT_SUBTITLE_FONT_SIZE = 48;
 const DEFAULT_SUBTITLE_HIGHLIGHT_COLOR = "#E6FF00";
+const DEFAULT_SUBTITLE_TEXT_COLOR = "#ffffff";
 
 type PipelineJobInput = {
   sourceVideo: File;
@@ -14,9 +22,11 @@ type PipelineJobInput = {
   outroMusicFile: File | null;
   videoFormat: "short" | "wide";
   renderSpeedMode: "turbo" | "balanced" | "quality";
+  lightningMode: boolean;
   language: string;
   subtitleFontChoice: string;
   subtitleFontSize: number;
+  subtitleTextColor: string;
   subtitleHighlightColor: string;
   generateTrailerIntroOutro: boolean;
   trailerTitle: string;
@@ -39,6 +49,11 @@ type PipelineJobInput = {
   lowerThirdSubtitle: string;
   lowerThirdStart: number;
   lowerThirdDuration: number;
+  youtubeAutoPublish: boolean;
+  youtubeTitle: string;
+  youtubeDescription: string;
+  youtubePrivacyStatus: YouTubePrivacyStatus;
+  youtubeTags: string[];
 };
 
 function getText(value: FormDataEntryValue | null, fallback = "") {
@@ -135,9 +150,29 @@ function getTimelineQualityForSpeedMode(
   return "fast";
 }
 
+function getYouTubePrivacyStatus(value: FormDataEntryValue | null): YouTubePrivacyStatus {
+  if (value === "public" || value === "unlisted" || value === "private") {
+    return value;
+  }
+  return "private";
+}
+
+function getYouTubeTags(value: FormDataEntryValue | null) {
+  if (typeof value !== "string") {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+    .slice(0, 30);
+}
+
 async function runPipelineJob(jobId: string, input: PipelineJobInput) {
   try {
-    await renderVideo(
+    const isLightning = input.lightningMode;
+    const renderResult = await renderVideo(
       {
         sourceVideo: input.sourceVideo,
         subtitleFile: input.subtitleFile,
@@ -152,7 +187,7 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
         trailerOutroSubtitle: input.trailerOutroSubtitle,
         outroCredits: input.outroCredits,
         trailerDuration: input.trailerDuration,
-        backgroundColor: input.backgroundColor,
+        backgroundColor: "#2A3439",
         textColor: input.textColor,
         accentColor: input.accentColor,
         fontChoice: input.fontChoiceTheme,
@@ -164,12 +199,26 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
         lowerThirdDuration: input.lowerThirdDuration,
         subtitleFontChoice: input.subtitleFontChoice,
         subtitleFontSize: input.subtitleFontSize,
+        subtitleTextColor: input.subtitleTextColor,
         subtitleHighlightColor: input.subtitleHighlightColor,
         subtitlesEnabled: true,
+        burnSubtitles: true,
+        enableRetroLook: !isLightning,
         subtitleLanguage: input.language,
       },
       { jobId },
     );
+
+    if (input.youtubeAutoPublish) {
+      await uploadVideoToYouTube({
+        jobId,
+        videoPath: renderResult.outputPath,
+        title: input.youtubeTitle,
+        description: input.youtubeDescription,
+        privacyStatus: input.youtubePrivacyStatus,
+        tags: input.youtubeTags,
+      });
+    }
   } catch {
     void 0;
   }
@@ -178,12 +227,17 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
+    const renderSpeedMode = getRenderSpeedMode(formData.get("renderSpeedMode"));
+    const draftId = getText(formData.get("draftId")).trim();
+    const draftInput = draftId ? await resolveRenderInputFromDraft(draftId) : null;
     const video = formData.get("video");
-    if (!(video instanceof File) || video.size === 0) {
+    const requestVideo = video instanceof File && video.size > 0 ? video : null;
+    const sourceVideo = requestVideo || draftInput?.sourceVideo || null;
+    if (!sourceVideo) {
       return NextResponse.json({ error: "Video upload is required." }, { status: 400 });
     }
 
-    const rawSubtitle = getOptionalFile(formData.get("subtitleFile"));
+    const rawSubtitle = getOptionalFile(formData.get("subtitleFile")) || draftInput?.subtitleFile || null;
     if (!rawSubtitle && !process.env.VOSK_MODEL_PATH?.trim()) {
       return NextResponse.json(
         {
@@ -194,10 +248,12 @@ export async function POST(request: Request) {
       );
     }
 
-    const clonedVideo = new File([await video.arrayBuffer()], video.name || "source.mp4", {
-      type: video.type || "video/mp4",
+    const clonedVideo = new File([await sourceVideo.arrayBuffer()], sourceVideo.name || "source.mp4", {
+      type: sourceVideo.type || "video/mp4",
     });
-    const rawLogo = validateLogoSvgFile(getOptionalFile(formData.get("logo")));
+    const rawLogo = validateLogoSvgFile(
+      getOptionalFile(formData.get("logo")) || draftInput?.logoFile || null,
+    );
     const rawIntroMusic = getOptionalFile(formData.get("introMusic"));
     const rawOutroMusic = getOptionalFile(formData.get("outroMusic"));
     const clonedSubtitle = rawSubtitle
@@ -220,8 +276,54 @@ export async function POST(request: Request) {
           type: rawOutroMusic.type || "audio/mpeg",
         })
       : null;
+    const youtubeAutoPublish = getBoolean(formData.get("youtubeAutoPublish"), false);
+    const fallbackYouTubeTitle = (sourceVideo.name || "Produced Video")
+      .replace(/\.[^/.]+$/, "")
+      .trim();
+    const youtubeTitle =
+      getText(formData.get("youtubeTitle"), fallbackYouTubeTitle || "Produced Video")
+        .trim()
+        .slice(0, 100) || fallbackYouTubeTitle || "Produced Video";
+    const youtubeDescription = getText(formData.get("youtubeDescription"), "")
+      .trim()
+      .slice(0, 5000);
+    const youtubePrivacyStatus = getYouTubePrivacyStatus(formData.get("youtubePrivacyStatus"));
+    const youtubeTags = getYouTubeTags(formData.get("youtubeTags"));
+
+    if (youtubeAutoPublish) {
+      if (!isYouTubeConfigured()) {
+        return NextResponse.json(
+          {
+            error:
+              "YouTube sync is not configured on the server. Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET first.",
+          },
+          { status: 400 },
+        );
+      }
+
+      const youtubeStatus = await getYouTubeConnectionStatus();
+      if (!youtubeStatus.connected) {
+        return NextResponse.json(
+          {
+            error:
+              youtubeStatus.message ||
+              "YouTube account is not connected. Connect your account in phase 3 first.",
+          },
+          { status: 400 },
+        );
+      }
+    }
 
     const jobId = randomUUID();
+    if (youtubeAutoPublish) {
+      await writeYouTubePublishStatus(jobId, {
+        status: "queued",
+        message: "YouTube upload queued. Upload starts after render completes.",
+        title: youtubeTitle,
+        privacyStatus: youtubePrivacyStatus,
+      });
+    }
+
     const input: PipelineJobInput = {
       sourceVideo: clonedVideo,
       subtitleFile: clonedSubtitle,
@@ -229,10 +331,15 @@ export async function POST(request: Request) {
       introMusicFile: clonedIntroMusic,
       outroMusicFile: clonedOutroMusic,
       videoFormat: getVideoFormat(formData.get("videoFormat")),
-      renderSpeedMode: getRenderSpeedMode(formData.get("renderSpeedMode")),
+      renderSpeedMode,
+      lightningMode: renderSpeedMode === "turbo",
       language: getText(formData.get("subtitleLanguage"), "en"),
       subtitleFontChoice: getText(formData.get("subtitleFontChoice"), "Poppins"),
       subtitleFontSize: getNumber(formData.get("subtitleFontSize"), DEFAULT_SUBTITLE_FONT_SIZE),
+      subtitleTextColor: getText(
+        formData.get("subtitleTextColor"),
+        DEFAULT_SUBTITLE_TEXT_COLOR,
+      ),
       subtitleHighlightColor: getText(
         formData.get("subtitleHighlightColor"),
         DEFAULT_SUBTITLE_HIGHLIGHT_COLOR,
@@ -256,6 +363,11 @@ export async function POST(request: Request) {
       lowerThirdSubtitle: getText(formData.get("lowerThirdSubtitle")),
       lowerThirdStart: getNumber(formData.get("lowerThirdStart"), 4),
       lowerThirdDuration: getNumber(formData.get("lowerThirdDuration"), 6),
+      youtubeAutoPublish,
+      youtubeTitle,
+      youtubeDescription,
+      youtubePrivacyStatus,
+      youtubeTags,
     };
 
     void runPipelineJob(jobId, input);

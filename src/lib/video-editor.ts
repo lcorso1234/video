@@ -41,8 +41,11 @@ export type RenderVideoInput = {
   lowerThirdDuration?: number;
   subtitleFontChoice?: string;
   subtitleFontSize?: number;
+  subtitleTextColor?: string;
   subtitleHighlightColor?: string;
   subtitlesEnabled?: boolean;
+  burnSubtitles?: boolean;
+  enableRetroLook?: boolean;
   subtitleLanguage?: string;
 };
 
@@ -836,7 +839,7 @@ function buildAssKaraokeText(
       if (index !== activeIndex) {
         return token;
       }
-      return `{\\rHighlight}${token}{\\rDefault}`;
+      return `{\\rHighlight}\\h${token}\\h{\\rDefault}`;
     })
     .join(" ");
 }
@@ -845,6 +848,7 @@ function buildAssFromTimedWords(input: {
   words: Array<{ word: string; start: number; end: number }>;
   fontFamily: string;
   fontSize: number;
+  textColor: string;
   highlightColor: string;
   hideRanges: Array<{ startSeconds: number; endSeconds: number }>;
 }) {
@@ -864,7 +868,9 @@ function buildAssFromTimedWords(input: {
   }
 
   const safeFontSize = Math.max(12, Math.min(72, Number(input.fontSize) || defaultSubtitleFontSize));
+  const textBgr = toAssBgrHex(input.textColor || "#ffffff");
   const highlightBgr = toAssBgrHex(input.highlightColor || defaultSubtitleHighlightColor);
+  const highlightTextBgr = toAssBgrHex(getReadableTextColorHex(input.highlightColor));
   const fontName = (input.fontFamily || "Arial").replace(/,/g, " ").replace(/'/g, "");
   const header = [
     "[Script Info]",
@@ -876,8 +882,8 @@ function buildAssFromTimedWords(input: {
     "",
     "[V4+ Styles]",
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-    `Style: Default,${fontName},${safeFontSize},&H00FFFFFF,&H00${highlightBgr},&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,1.8,0,2,26,26,36,1`,
-    `Style: Highlight,${fontName},${safeFontSize},&H00000000,&H00${highlightBgr},&H00000000,&H00${highlightBgr},-1,0,0,0,100,100,0,0,3,0,0,2,26,26,36,1`,
+    `Style: Default,${fontName},${safeFontSize},&H00${textBgr},&H00${highlightBgr},&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,1.8,0,2,26,26,36,1`,
+    `Style: Highlight,${fontName},${safeFontSize},&H00${highlightTextBgr},&H00${highlightBgr},&H00${highlightBgr},&H00${highlightBgr},-1,0,0,0,100,100,0,0,3,1.6,0,2,26,26,36,1`,
     "",
     "[Events]",
     "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -911,6 +917,20 @@ function toAssBgrHex(value: string) {
   return `${blue}${green}${red}`.toUpperCase();
 }
 
+function getReadableTextColorHex(backgroundHex: string | undefined) {
+  const clean = String(backgroundHex || "")
+    .trim()
+    .replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) {
+    return "000000";
+  }
+  const red = parseInt(clean.slice(0, 2), 16);
+  const green = parseInt(clean.slice(2, 4), 16);
+  const blue = parseInt(clean.slice(4, 6), 16);
+  const luma = (red * 299 + green * 587 + blue * 114) / 1000;
+  return luma >= 150 ? "000000" : "FFFFFF";
+}
+
 function escapeSubtitlesFilterPath(value: string) {
   return value
     .replace(/\\/g, "/")
@@ -929,16 +949,17 @@ function buildSubtitleForceStyle(input: RenderVideoInput) {
     12,
     Math.min(72, Number(input.subtitleFontSize) || defaultSubtitleFontSize),
   );
+  const textBgr = toAssBgrHex(input.subtitleTextColor || "#ffffff");
   const highlightBgr = toAssBgrHex(input.subtitleHighlightColor || defaultSubtitleHighlightColor);
   return [
     `Fontname=${fontName}`,
     `Fontsize=${fontSize}`,
-    "PrimaryColour=&H00FFFFFF",
+    `PrimaryColour=&H00${textBgr}`,
     `SecondaryColour=&H00${highlightBgr}`,
-    "OutlineColour=&H00000000",
-    "BackColour=&H00000000",
-    "BorderStyle=1",
-    "Outline=2.2",
+    `OutlineColour=&H00${highlightBgr}`,
+    `BackColour=&H00${highlightBgr}`,
+    "BorderStyle=3",
+    "Outline=0",
     "Shadow=0",
     "Alignment=2",
     "MarginV=36",
@@ -1393,6 +1414,7 @@ function buildVideoFilter(
   theme: RenderTheme,
   quality: EncodeProfile,
   fontPath: string | null,
+  enableRetroLook: boolean,
 ) {
   const filters = [
     `scale=${target.width}:${target.height}:force_original_aspect_ratio=decrease:flags=${quality.scaleFlags}`,
@@ -1405,6 +1427,9 @@ function buildVideoFilter(
   }
 
   filters.push("setsar=1");
+  if (enableRetroLook) {
+    filters.push(buildRetroTvFilter());
+  }
 
   if (!lowerThird || (!lowerThird.title && !lowerThird.subtitle)) {
     return filters.join(",");
@@ -1495,6 +1520,16 @@ function buildVideoFilter(
   return filters.join(",");
 }
 
+function buildRetroTvFilter() {
+  return [
+    "eq=saturation=0.82:contrast=1.12:brightness=0.015:gamma=0.92",
+    "colorbalance=rs=0.04:gs=-0.01:bs=-0.05",
+    "noise=alls=9:allf=t+u",
+    "drawgrid=w=iw:h=4:t=1:c=black@0.14",
+    "vignette=PI/5",
+  ].join(",");
+}
+
 async function concatenateClipsDirect(params: { concatListPath: string; outputPath: string }) {
   await runCommand(getFfmpegBinaryPath(), [
     "-y",
@@ -1522,6 +1557,7 @@ async function normalizeClip(params: {
   theme: RenderTheme;
   quality: EncodeProfile;
   fontPath: string | null;
+  enableRetroLook: boolean;
 }) {
   const mediaInfo = await probeMedia(params.inputPath);
   const videoFilter = buildVideoFilter(
@@ -1530,6 +1566,7 @@ async function normalizeClip(params: {
     params.theme,
     params.quality,
     params.fontPath,
+    params.enableRetroLook,
   );
 
   const subtitleFilter = params.subtitlePath
@@ -1607,6 +1644,7 @@ async function createTrailerBrandClip(params: {
   soundtrackPath?: string | null;
   theme: RenderTheme;
   quality: EncodeProfile;
+  enableRetroLook: boolean;
   soundtrackChoice: SoundtrackChoice;
   title?: string;
   subtitle?: string;
@@ -1621,10 +1659,13 @@ async function createTrailerBrandClip(params: {
   const introSubtitle = params.subtitle?.trim() || "A cinematic AI-finished trailer";
   const outroTitle = params.title?.trim() || "THANK YOU FOR WATCHING";
   const outroSubtitle = params.subtitle?.trim() || "Stay tuned for the next release";
-  const logoFadeDuration = Math.min(1.35, Math.max(0.8, duration * 0.45));
-  const contentFadeDuration = Math.min(1.1, Math.max(0.6, duration * 0.32));
-  const contentAlphaExpr = `if(lt(t\\,${contentFadeDuration})\\,t/${contentFadeDuration}\\,1)`;
-  const baseColor = "0x000000";
+  const logoBlackHoldDuration = Math.max(0.18, duration * 0.14);
+  const logoBlackToWhiteEnd = Math.max(logoBlackHoldDuration + 0.28, duration * 0.38);
+  const logoBlackToWhiteDuration = Math.max(0.24, logoBlackToWhiteEnd - logoBlackHoldDuration);
+  const logoWhiteHoldEnd = Math.max(logoBlackToWhiteEnd + 0.22, duration * 0.58);
+  const logoWhiteToColorDuration = Math.max(0.25, duration - logoWhiteHoldEnd);
+  const contentAlphaExpr = "1";
+  const baseColor = "0x2A3439";
   const textColor = toFfmpegHex(params.theme.textColor);
   const font = params.fontPath
     ? `:fontfile='${escapeFilterValue(params.fontPath)}'`
@@ -1664,7 +1705,12 @@ async function createTrailerBrandClip(params: {
       Math.round(params.target.width * (params.outro ? 0.14 : 0.18)),
     );
     filters.push(
-      `[${logoInputIndex}:v]format=rgba,scale=${logoScale}:-1:force_original_aspect_ratio=decrease,fade=t=in:st=0:d=${logoFadeDuration}:alpha=1,colorchannelmixer=aa=1[logo]`,
+      `[${logoInputIndex}:v]format=rgba,scale=${logoScale}:-1:force_original_aspect_ratio=decrease[logo-base]`,
+      `[logo-base]split=3[logo-color][logo-black-src][logo-white-src]`,
+      `[logo-black-src]colorchannelmixer=rr=0:gg=0:bb=0[logo-black]`,
+      `[logo-white-src]eq=contrast=0:brightness=0.5[logo-white]`,
+      `[logo-black][logo-white]blend=all_expr='if(lte(T,${logoBlackHoldDuration}),A,if(lte(T,${logoBlackToWhiteEnd}),A*(1-((T-${logoBlackHoldDuration})/${logoBlackToWhiteDuration}))+B*(((T-${logoBlackHoldDuration})/${logoBlackToWhiteDuration})),B))'[logo-phase-white]`,
+      `[logo-phase-white][logo-color]blend=all_expr='if(lte(T,${logoWhiteHoldEnd}),A,if(gte(T,${duration}),B,A*(1-((T-${logoWhiteHoldEnd})/${logoWhiteToColorDuration}))+B*((T-${logoWhiteHoldEnd})/${logoWhiteToColorDuration})))',colorchannelmixer=aa=1[logo]`,
     );
   }
 
@@ -1695,7 +1741,7 @@ async function createTrailerBrandClip(params: {
       .map((line) => line.trim())
       .filter(Boolean);
     outroLines.push(...extraCredits);
-    if (outroLines.length === 0) {
+    if (outroLines.length === 0 && !params.logoPath) {
       if (outroTitle.trim()) {
         outroLines.push(outroTitle.trim());
       }
@@ -1711,22 +1757,22 @@ async function createTrailerBrandClip(params: {
     const lineHeight = Math.max(creditsFontSize + 8, Math.round(creditsFontSize * 1.42));
     const creditsStartY = Math.round(params.target.height * 0.43);
 
-    let currentLabel = visualLabel;
-    for (let i = 0; i < outroLines.length; i += 1) {
-      const nextLabel = i === outroLines.length - 1 ? "[vstage]" : `[vstage-credits-${i}]`;
-      const escapedLine = escapeFilterValue(outroLines[i]);
-      const lineY = creditsStartY + i * lineHeight;
-      filters.push(
-        `${currentLabel}drawtext=text='${escapedLine}'${font}:fontcolor=${textColor}@0.95:fontsize=${creditsFontSize}:x=(w-text_w)/2:y=${lineY}:alpha='${contentAlphaExpr}'${i === 0 ? ":borderw=2:bordercolor=black@0.52:shadowcolor=black@0.35:shadowx=2:shadowy=2" : ""}${nextLabel}`,
-      );
-      currentLabel = nextLabel;
+    if (outroLines.length > 0) {
+      let currentLabel = visualLabel;
+      for (let i = 0; i < outroLines.length; i += 1) {
+        const nextLabel = i === outroLines.length - 1 ? "[vstage]" : `[vstage-credits-${i}]`;
+        const escapedLine = escapeFilterValue(outroLines[i]);
+        const lineY = creditsStartY + i * lineHeight;
+        filters.push(
+          `${currentLabel}drawtext=text='${escapedLine}'${font}:fontcolor=${textColor}@0.95:fontsize=${creditsFontSize}:x=(w-text_w)/2:y=${lineY}:alpha='${contentAlphaExpr}'${i === 0 ? ":borderw=2:bordercolor=black@0.52:shadowcolor=black@0.35:shadowx=2:shadowy=2" : ""}${nextLabel}`,
+        );
+        currentLabel = nextLabel;
+      }
+      visualLabel = "[vstage]";
     }
-    visualLabel = "[vstage]";
   }
 
-  filters.push(
-    `${visualLabel}drawbox=x=0:y=0:w=iw:h=ih:color=${baseColor}@0.2:t=fill,fade=t=in:st=0:d=${fadeLength},fade=t=out:st=${fadeOutStart}:d=${fadeLength}[vout]`,
-  );
+  filters.push(`${visualLabel}copy[vout]`);
 
   args.push(
     "-filter_complex",
@@ -1995,6 +2041,12 @@ export async function renderVideo(
     reportProgress("running", 10, "Uploaded source and optional assets.");
     const shouldGenerateTrailerIntroOutro = input.generateTrailerIntroOutro ?? true;
     const subtitlesEnabled = input.subtitlesEnabled ?? true;
+    const burnSubtitles = input.burnSubtitles ?? true;
+    const enableRetroLook = input.enableRetroLook ?? true;
+    const canFastPathSubtitles =
+      !subtitlesEnabled ||
+      Boolean(subtitleUploadPath) ||
+      Boolean(process.env.VOSK_MODEL_PATH?.trim());
     const wantsLowerThird =
       Boolean(input.lowerThirdTitle?.trim()) || Boolean(input.lowerThirdSubtitle?.trim());
     const useFastPassThrough =
@@ -2005,7 +2057,8 @@ export async function renderVideo(
       !input.introMusicFile?.size &&
       !input.outroMusicFile?.size &&
       !input.brandLogo?.size &&
-      !subtitlesEnabled &&
+      (!burnSubtitles || !subtitlesEnabled) &&
+      canFastPathSubtitles &&
       !wantsLowerThird;
 
     if (useFastPassThrough) {
@@ -2028,12 +2081,55 @@ export async function renderVideo(
           outputPath,
         ]);
 
+        let subtitleFilename: string | undefined;
+        if (subtitlesEnabled) {
+          const subtitleOutputPath = getJobSubtitlePath(jobId);
+          let subtitleRaw = "";
+          if (subtitleUploadPath) {
+            subtitleRaw = await readFile(subtitleUploadPath, "utf8");
+          } else {
+            const subtitleLanguage =
+              (input.subtitleLanguage || defaultSubtitleLanguage).trim() ||
+              defaultSubtitleLanguage;
+            const subtitleAudioPath = path.join(workingDirectory, "subtitle-source.wav");
+            const generatedSubtitlePath = path.join(workingDirectory, "auto-subtitles.srt");
+            await ensureDirectory(subtitleCacheRoot);
+            const subtitleCacheKey = createHash("sha1")
+              .update(
+                `${input.sourceVideo.name}|${input.sourceVideo.size}|${input.sourceVideo.lastModified}|${subtitleLanguage}`,
+              )
+              .digest("hex");
+            const cachedSubtitlePath = path.join(subtitleCacheRoot, `${subtitleCacheKey}.srt`);
+
+            try {
+              subtitleRaw = await readFile(cachedSubtitlePath, "utf8");
+            } catch {
+              await extractAudioFromVideo({
+                inputPath: sourceUploadPath,
+                outputPath: subtitleAudioPath,
+              });
+              await transcribeAudioToSrt({
+                audioPath: subtitleAudioPath,
+                outputPath: generatedSubtitlePath,
+                language: subtitleLanguage,
+              });
+              subtitleRaw = await readFile(generatedSubtitlePath, "utf8");
+              await writeFile(cachedSubtitlePath, subtitleRaw, "utf8");
+            }
+          }
+
+          const normalizedSubtitle = normalizeSrtForBurn(subtitleRaw) || subtitleRaw;
+          await writeFile(subtitleOutputPath, normalizedSubtitle, "utf8");
+          subtitleFilename = getSubtitleFilename(jobId);
+        }
+
         const fileStat = await stat(outputPath);
         await writeRenderJobStatus(jobId, {
           status: "completed",
           progress: 100,
           message: "Fast render complete. Download is ready.",
           filename: getDownloadFilename(jobId),
+          subtitleFilename,
           sizeInBytes: fileStat.size,
         });
 
@@ -2041,6 +2137,7 @@ export async function renderVideo(
           jobId,
           outputPath,
           filename: getDownloadFilename(jobId),
+          subtitleFilename,
           sizeInBytes: fileStat.size,
         };
       } catch (error) {
@@ -2093,6 +2190,7 @@ export async function renderVideo(
           },
         ]
       : [];
+    const subtitleHideRanges = burnSubtitles ? lowerThirdHideRanges : [];
 
     if (subtitlesEnabled) {
       const subtitleLanguage =
@@ -2106,7 +2204,7 @@ export async function renderVideo(
         const uploadedSubtitleRaw = await readFile(subtitleUploadPath, "utf8");
         const filteredSubtitle = removeSrtSegmentsInRanges(
           uploadedSubtitleRaw,
-          lowerThirdHideRanges,
+          subtitleHideRanges,
         );
         const normalizedSubtitle = normalizeSrtForBurn(
           filteredSubtitle || uploadedSubtitleRaw,
@@ -2143,7 +2241,7 @@ export async function renderVideo(
           await writeFile(cachedSubtitlePath, rawSubtitle, "utf8");
         }
 
-        const filteredSubtitle = removeSrtSegmentsInRanges(rawSubtitle, lowerThirdHideRanges);
+        const filteredSubtitle = removeSrtSegmentsInRanges(rawSubtitle, subtitleHideRanges);
         const normalizedSubtitle = normalizeSrtForBurn(filteredSubtitle || rawSubtitle);
         await writeFile(subtitleSourcePath, normalizedSubtitle || rawSubtitle, "utf8");
         try {
@@ -2155,11 +2253,11 @@ export async function renderVideo(
         reportProgress("running", 29, "Prepared speech-to-text subtitles.");
       }
 
-      subtitleBurnPath = subtitleSourcePath;
+      subtitleBurnPath = burnSubtitles ? subtitleSourcePath : null;
       subtitleFilename = getSubtitleFilename(jobId);
     }
 
-    if (subtitleBurnPath && subtitleWordsPath) {
+    if (burnSubtitles && subtitleBurnPath && subtitleWordsPath) {
       try {
         const wordsRaw = await readFile(subtitleWordsPath, "utf8");
         const parsedWords = JSON.parse(wordsRaw) as unknown;
@@ -2168,8 +2266,9 @@ export async function renderVideo(
           words: normalizedWords,
           fontFamily: input.subtitleFontChoice || "Arial",
           fontSize: Number(input.subtitleFontSize) || defaultSubtitleFontSize,
+          textColor: input.subtitleTextColor || "#ffffff",
           highlightColor: input.subtitleHighlightColor || defaultSubtitleHighlightColor,
-          hideRanges: lowerThirdHideRanges,
+          hideRanges: subtitleHideRanges,
         });
         if (karaokeAss.trim()) {
           const assPath = path.join(workingDirectory, "subtitles-karaoke.ass");
@@ -2187,11 +2286,12 @@ export async function renderVideo(
       outputPath: normalizedSourcePath,
       target,
       lowerThird,
-      subtitlePath: subtitleBurnPath,
-      subtitleForceStyle: buildSubtitleForceStyle(input),
+      subtitlePath: burnSubtitles ? subtitleBurnPath : null,
+      subtitleForceStyle: burnSubtitles ? buildSubtitleForceStyle(input) : undefined,
       theme,
       quality,
       fontPath,
+      enableRetroLook,
     });
     reportProgress("running", 30, "Normalized main source clip.");
 
@@ -2225,6 +2325,7 @@ export async function renderVideo(
         soundtrackPath: introMusicUploadPath,
         theme,
         quality,
+        enableRetroLook,
         soundtrackChoice,
         title: input.trailerTitle,
         subtitle: input.trailerSubtitle,
@@ -2237,6 +2338,7 @@ export async function renderVideo(
         theme,
         quality,
         fontPath,
+        enableRetroLook,
       });
       hasIntroClip = true;
       subtitleOffsetSeconds = clampTrailerDuration(input.trailerDuration);
@@ -2249,6 +2351,7 @@ export async function renderVideo(
         theme,
         quality,
         fontPath,
+        enableRetroLook,
       });
       hasIntroClip = true;
       subtitleOffsetSeconds = (await probeMedia(normalizedIntroPath)).duration;
@@ -2265,6 +2368,7 @@ export async function renderVideo(
         soundtrackPath: outroMusicUploadPath,
         theme,
         quality,
+        enableRetroLook,
         soundtrackChoice,
         title: input.trailerOutroTitle,
         subtitle: input.trailerOutroSubtitle || input.trailerSubtitle,
@@ -2279,6 +2383,7 @@ export async function renderVideo(
         theme,
         quality,
         fontPath,
+        enableRetroLook,
       });
       hasOutroClip = true;
       reportProgress("running", 45, "Generated outro clip.");
@@ -2290,6 +2395,7 @@ export async function renderVideo(
         theme,
         quality,
         fontPath,
+        enableRetroLook,
       });
       hasOutroClip = true;
       reportProgress("running", 45, "Prepared uploaded outro clip.");

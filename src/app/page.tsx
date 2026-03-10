@@ -1,6 +1,42 @@
 "use client";
 
-import { type FormEvent, useEffect, useRef, useState } from "react";
+/* eslint-disable @next/next/no-img-element */
+
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+
+type RenderJobPhase = "queued" | "running" | "completed" | "failed";
+type YouTubePublishPhase = "queued" | "uploading" | "completed" | "failed";
+type YouTubePrivacyStatus = "private" | "unlisted" | "public";
+
+type YouTubeConnectionStatus = {
+  configured: boolean;
+  connected: boolean;
+  channelId?: string;
+  channelTitle?: string;
+  message?: string;
+};
+
+type YouTubePublishStatus = {
+  status: YouTubePublishPhase;
+  message: string;
+  updatedAt: string;
+  title?: string;
+  privacyStatus?: YouTubePrivacyStatus;
+  videoId?: string;
+  videoUrl?: string;
+  error?: string;
+};
+
+type RenderStatusResponse = {
+  jobId: string;
+  status: RenderJobPhase;
+  progress: number;
+  message: string;
+  filename?: string;
+  sizeInBytes?: number;
+  error?: string;
+  youtube?: YouTubePublishStatus | null;
+};
 
 type RenderResponse = {
   jobId: string;
@@ -10,78 +46,77 @@ type RenderResponse = {
   sizeInBytes: number;
 };
 
-type SaveToMacResponse = {
-  destinationFolder: string;
-  videoPath: string;
-  videoFilename: string;
-  subtitlePath?: string;
-  subtitleFilename?: string;
-};
+type AppPhase = 1 | 2 | 3;
 
-type Step1SubtitleResponse = {
-  filename: string;
-  content: string;
-  language: string;
-  draftId: string;
-};
+const INTRO_OUTRO_BACKGROUND = "#6f7b86";
 
-type DraftStateResponse = {
-  draftId: string;
-  sourceFilename: string;
-  subtitleFilename?: string;
-  logoFilename?: string;
-  subtitleContent?: string;
-  updatedAt?: string;
-  error?: string;
-};
+function stripFileExtension(filename: string) {
+  return filename.replace(/\.[^/.]+$/, "");
+}
 
-type RenderJobPhase = "queued" | "running" | "completed" | "failed";
-type WizardStep = 1 | 2 | 3 | 4;
+function normalizeHexColor(value: string) {
+  const trimmed = value.trim().replace(/^#/, "");
+  if (/^[0-9a-fA-F]{3}$/.test(trimmed)) {
+    return `#${trimmed
+      .split("")
+      .map((char) => `${char}${char}`)
+      .join("")
+      .toLowerCase()}`;
+  }
+  if (/^[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return `#${trimmed.toLowerCase()}`;
+  }
+  if (/^[0-9a-fA-F]{8}$/.test(trimmed)) {
+    return `#${trimmed.slice(0, 6).toLowerCase()}`;
+  }
+  return null;
+}
 
-type RenderStatusResponse = {
-  jobId: string;
-  status: RenderJobPhase;
-  progress: number;
-  message: string;
-  filename?: string;
-  subtitleFilename?: string;
-  sizeInBytes?: number;
-  error?: string;
-  updatedAt?: string;
-};
+function parseRgbChannel(value: string) {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return Math.max(0, Math.min(255, Math.round(parsed)));
+}
 
-const googleFonts = [
-  "Poppins",
-  "Montserrat",
-  "Roboto",
-  "Open Sans",
-  "Lato",
-  "Oswald",
-  "Raleway",
-  "Nunito",
-  "Work Sans",
-  "Source Sans 3",
-  "Inter",
-  "Ubuntu",
-  "PT Sans",
-  "Josefin Sans",
-  "Bebas Neue",
-  "Playfair Display",
-  "Merriweather",
-  "Lora",
-  "Noto Serif",
-  "Libre Baskerville",
-  "Cormorant Garamond",
-  "Arvo",
-  "DM Serif Display",
-  "Abril Fatface",
-  "Space Grotesk",
-  "Titillium Web",
-  "Barlow Condensed",
-  "Anton",
-  "Fira Sans",
-  "Inconsolata",
-] as const;
+function rgbToHex(red: number, green: number, blue: number) {
+  return `#${[red, green, blue]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function extractSvgPalette(svgText: string) {
+  const collected = new Set<string>();
+  const addColor = (color: string | null) => {
+    if (!color) {
+      return;
+    }
+    collected.add(color);
+  };
+
+  const hexMatches = svgText.match(/#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g) || [];
+  for (const match of hexMatches) {
+    addColor(normalizeHexColor(match));
+  }
+
+  const rgbRegex = /rgba?\(([^)]+)\)/gi;
+  let rgbMatch = rgbRegex.exec(svgText);
+  while (rgbMatch) {
+    const channels = rgbMatch[1].split(",").slice(0, 3);
+    if (channels.length === 3) {
+      const red = parseRgbChannel(channels[0]);
+      const green = parseRgbChannel(channels[1]);
+      const blue = parseRgbChannel(channels[2]);
+      if (red !== null && green !== null && blue !== null) {
+        addColor(rgbToHex(red, green, blue));
+      }
+    }
+    rgbMatch = rgbRegex.exec(svgText);
+  }
+
+  return Array.from(collected).slice(0, 8);
+}
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
@@ -91,69 +126,35 @@ function formatBytes(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const draftStorageKey = "video_editor_wizard_draft_id";
-
 export default function Home() {
-  const appleSubtitleFontSize = 48;
-  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [activePhase, setActivePhase] = useState<AppPhase>(1);
   const [logoFile, setLogoFile] = useState<File | null>(null);
-  const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
-  const [introMusicFile, setIntroMusicFile] = useState<File | null>(null);
-  const [outroMusicFile, setOutroMusicFile] = useState<File | null>(null);
+  const [logoPreviewUrl, setLogoPreviewUrl] = useState("");
+  const [logoPalette, setLogoPalette] = useState<string[]>([]);
+  const [subtitleHighlightColor, setSubtitleHighlightColor] = useState("");
+  const [logoPaletteError, setLogoPaletteError] = useState("");
+  const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoFormat, setVideoFormat] = useState<"short" | "wide">("wide");
-
-  const [fontChoice, setFontChoice] = useState<(typeof googleFonts)[number]>("Poppins");
-  const [qualityProfile, setQualityProfile] = useState<"fast" | "balanced" | "high">(
-    "fast",
-  );
-  const [soundtrackChoice, setSoundtrackChoice] = useState<
-    "startup-chime" | "spirited-blues" | "theater-chime" | "trailer-braam" | "piano-lift"
-  >("theater-chime");
-  const [generateTrailerIntroOutro, setGenerateTrailerIntroOutro] = useState(true);
-  const [backgroundColor, setBackgroundColor] = useState("#050816");
-  const [textColor, setTextColor] = useState("#f8fafc");
-  const [accentColor, setAccentColor] = useState("#4f80ff");
-  const [subtitleFontChoice, setSubtitleFontChoice] =
-    useState<(typeof googleFonts)[number]>("Poppins");
-  const [subtitleHighlightColor, setSubtitleHighlightColor] = useState("#E6FF00");
-  const [renderSpeedMode, setRenderSpeedMode] = useState<"turbo" | "balanced" | "quality">(
-    "turbo",
-  );
-
-  const [trailerTitle, setTrailerTitle] = useState("COMING UP NEXT");
-  const [trailerSubtitle, setTrailerSubtitle] = useState("Hey Siri, come in here.");
-  const [trailerOutroTitle, setTrailerOutroTitle] = useState("THANK YOU FOR WATCHING");
-  const [trailerOutroSubtitle, setTrailerOutroSubtitle] = useState(
-    "Stay tuned for the next release",
-  );
-  const [outroCredits, setOutroCredits] = useState(
+  const [credits, setCredits] = useState(
     "Executive Producer - Name\nDirector - Name\nEditor - Name\nPresented by - Organization",
   );
-  const [trailerDuration, setTrailerDuration] = useState("3.5");
-
-  const [lowerThirdTitle, setLowerThirdTitle] = useState("Tamillow Institute");
-  const [lowerThirdSubtitle, setLowerThirdSubtitle] = useState("Maureen Tamillow, LCPC");
-  const [lowerThirdStart, setLowerThirdStart] = useState("4");
-  const [lowerThirdDuration, setLowerThirdDuration] = useState("6");
+  const [youtubeConnection, setYouTubeConnection] = useState<YouTubeConnectionStatus | null>(null);
+  const [youtubeBusy, setYouTubeBusy] = useState(false);
+  const [youtubeAutoPublish, setYouTubeAutoPublish] = useState(false);
+  const [youtubeTitle, setYouTubeTitle] = useState("Produced Video");
+  const [youtubeDescription, setYouTubeDescription] = useState("");
+  const [youtubePrivacyStatus, setYouTubePrivacyStatus] = useState<YouTubePrivacyStatus>("private");
+  const [youtubeTags, setYouTubeTags] = useState("");
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState(
-    "Step 1: upload source video. Step 2: configure branding/subtitles. Step 3: render. Step 4: preview and download.",
+    "Phase 1: upload SVG logo and confirm preview.",
   );
   const [errorMessage, setErrorMessage] = useState("");
-  const [result, setResult] = useState<RenderResponse | null>(null);
   const [activeRenderJobId, setActiveRenderJobId] = useState<string | null>(null);
   const [renderStatus, setRenderStatus] = useState<RenderStatusResponse | null>(null);
-  const [isSavingToMac, setIsSavingToMac] = useState(false);
-  const [savedToMacPath, setSavedToMacPath] = useState("");
-  const [saveToMacError, setSaveToMacError] = useState("");
-  const [isGeneratingSrt, setIsGeneratingSrt] = useState(false);
-  const [step1SrtMessage, setStep1SrtMessage] = useState("");
-  const [draftId, setDraftId] = useState("");
-  const [step2SaveMessage, setStep2SaveMessage] = useState("");
-  const [wizardStep, setWizardStep] = useState<WizardStep>(1);
+  const [result, setResult] = useState<RenderResponse | null>(null);
   const statusPollerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const subtitleInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     return () => {
@@ -165,70 +166,118 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!subtitleInputRef.current) {
+    if (!logoFile) {
+      setLogoPreviewUrl("");
       return;
     }
 
-    if (!subtitleFile) {
-      subtitleInputRef.current.value = "";
-      return;
-    }
+    const objectUrl = URL.createObjectURL(logoFile);
+    setLogoPreviewUrl(objectUrl);
 
-    try {
-      const dataTransfer = new DataTransfer();
-      dataTransfer.items.add(subtitleFile);
-      subtitleInputRef.current.files = dataTransfer.files;
-    } catch {
-      void 0;
-    }
-  }, [subtitleFile]);
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [logoFile]);
 
   useEffect(() => {
-    if (!draftId) {
-      localStorage.removeItem(draftStorageKey);
-      return;
-    }
+    let cancelled = false;
 
-    localStorage.setItem(draftStorageKey, draftId);
-  }, [draftId]);
+    async function loadPalette() {
+      if (!logoFile) {
+        setLogoPalette([]);
+        setSubtitleHighlightColor("");
+        setLogoPaletteError("");
+        return;
+      }
 
-  useEffect(() => {
-    const restoreDraftId = localStorage.getItem(draftStorageKey);
-    if (!restoreDraftId) {
-      return;
-    }
-
-    const restoreDraft = async () => {
       try {
-        const response = await fetch(`/api/drafts/${restoreDraftId}`, {
-          cache: "no-store",
-        });
-        const payload = (await response.json()) as DraftStateResponse;
-        if (!response.ok) {
-          localStorage.removeItem(draftStorageKey);
+        const content = await logoFile.text();
+        if (cancelled) {
           return;
         }
-
-        setDraftId(payload.draftId);
-        if (payload.subtitleContent) {
-          const restoredSubtitleFile = new File(
-            [payload.subtitleContent],
-            payload.subtitleFilename || "subtitles.srt",
-            { type: "application/x-subrip; charset=utf-8" },
-          );
-          setSubtitleFile(restoredSubtitleFile);
-        }
-        setStep2SaveMessage(
-          `Restored backend draft${payload.subtitleFilename ? ` | Subtitle: ${payload.subtitleFilename}` : ""}${payload.logoFilename ? ` | Logo: ${payload.logoFilename}` : ""}`,
+        const palette = extractSvgPalette(content);
+        setLogoPalette(palette);
+        setSubtitleHighlightColor((current) =>
+          current && palette.includes(current) ? current : (palette[0] || ""),
         );
-        setStatusMessage("Restored saved pipeline draft from backend.");
+        setLogoPaletteError(
+          palette.length
+            ? ""
+            : "No usable brand colors were found in this SVG. Use an SVG with explicit fill/stroke colors.",
+        );
       } catch {
-        localStorage.removeItem(draftStorageKey);
+        if (cancelled) {
+          return;
+        }
+        setLogoPalette([]);
+        setSubtitleHighlightColor("");
+        setLogoPaletteError("Unable to read SVG colors.");
       }
-    };
+    }
 
-    void restoreDraft();
+    void loadPalette();
+    return () => {
+      cancelled = true;
+    };
+  }, [logoFile]);
+
+  useEffect(() => {
+    if (!videoFile) {
+      return;
+    }
+
+    setYouTubeTitle((current) => {
+      if (!current.trim() || current === "Produced Video") {
+        const cleaned = stripFileExtension(videoFile.name).trim();
+        return cleaned || "Produced Video";
+      }
+      return current;
+    });
+  }, [videoFile]);
+
+  const refreshYouTubeConnection = useCallback(async () => {
+    try {
+      const response = await fetch("/api/youtube/status", { cache: "no-store" });
+      const payload = (await response.json()) as YouTubeConnectionStatus & { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || payload.message || "Unable to load YouTube status.");
+      }
+      setYouTubeConnection(payload);
+    } catch (error) {
+      setYouTubeConnection({
+        configured: false,
+        connected: false,
+        message: error instanceof Error ? error.message : "Unable to load YouTube status.",
+      });
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshYouTubeConnection();
+  }, [refreshYouTubeConnection]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const youtubeState = params.get("youtube");
+    const youtubeMessage = params.get("message");
+    if (!youtubeState) {
+      return;
+    }
+
+    void refreshYouTubeConnection();
+    if (youtubeState === "connected") {
+      setStatusMessage("YouTube account connected.");
+      setErrorMessage("");
+    } else if (youtubeState === "error") {
+      setErrorMessage(youtubeMessage || "YouTube connection failed.");
+    }
+
+    params.delete("youtube");
+    params.delete("message");
+    const query = params.toString();
+    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}`;
+    window.history.replaceState({}, "", nextUrl);
+  }, [refreshYouTubeConnection]);
 
   useEffect(() => {
     if (!activeRenderJobId || !isSubmitting) {
@@ -249,32 +298,46 @@ export default function Home() {
           return;
         }
 
-        const payload = (await response.json()) as RenderStatusResponse & {
-          error?: string;
-        };
+        const payload = (await response.json()) as RenderStatusResponse & { error?: string };
         if (!response.ok) {
-          throw new Error(payload.error || "Unable to get render status.");
+          throw new Error(payload.error || "Unable to fetch render status.");
         }
 
         setRenderStatus(payload);
-        setStatusMessage(payload.message);
+        const youtubeState = payload.youtube?.status;
+        const youtubeInFlight =
+          payload.status === "completed" && (youtubeState === "uploading" || youtubeState === "queued");
+        if (youtubeInFlight) {
+          setStatusMessage(payload.youtube?.message || payload.message || "Uploading to YouTube...");
+        } else {
+          setStatusMessage(payload.message || "Rendering...");
+        }
 
         if (payload.status === "completed") {
+          setResult((current) => {
+            if (current?.jobId === payload.jobId) {
+              return current;
+            }
+            return {
+              jobId: payload.jobId,
+              filename: payload.filename || `${payload.jobId}.mp4`,
+              downloadUrl: `/api/download/${payload.jobId}`,
+              previewUrl: `/api/preview/${payload.jobId}`,
+              sizeInBytes: payload.sizeInBytes ?? 0,
+            };
+          });
+
+          if (youtubeInFlight) {
+            return;
+          }
+
           if (statusPollerRef.current) {
             clearInterval(statusPollerRef.current);
             statusPollerRef.current = null;
           }
 
-          setActiveRenderJobId(null);
           setIsSubmitting(false);
-          setResult({
-            jobId: payload.jobId,
-            filename: payload.filename || `${payload.jobId}.mp4`,
-            downloadUrl: `/api/download/${payload.jobId}`,
-            previewUrl: `/api/preview/${payload.jobId}`,
-            sizeInBytes: payload.sizeInBytes ?? 0,
-          });
-          setWizardStep(4);
+          setActiveRenderJobId(null);
           setErrorMessage("");
           return;
         }
@@ -285,8 +348,8 @@ export default function Home() {
             statusPollerRef.current = null;
           }
 
-          setActiveRenderJobId(null);
           setIsSubmitting(false);
+          setActiveRenderJobId(null);
           setErrorMessage(payload.error || payload.message || "Render failed.");
         }
       } catch (error) {
@@ -295,9 +358,9 @@ export default function Home() {
           statusPollerRef.current = null;
         }
 
-        setActiveRenderJobId(null);
         setIsSubmitting(false);
-        setErrorMessage(error instanceof Error ? error.message : "Unable to get render status.");
+        setActiveRenderJobId(null);
+        setErrorMessage(error instanceof Error ? error.message : "Render failed.");
       }
     };
 
@@ -305,12 +368,79 @@ export default function Home() {
     statusPollerRef.current = setInterval(pollStatus, 1500);
   }, [activeRenderJobId, isSubmitting]);
 
+  async function handleYouTubeConnect() {
+    setYouTubeBusy(true);
+    setErrorMessage("");
+
+    try {
+      const response = await fetch("/api/youtube/auth-url", { cache: "no-store" });
+      const payload = (await response.json()) as { url?: string; error?: string };
+      if (!response.ok || !payload.url) {
+        throw new Error(payload.error || "Unable to start YouTube connection.");
+      }
+
+      window.location.href = payload.url;
+    } catch (error) {
+      setYouTubeBusy(false);
+      setErrorMessage(error instanceof Error ? error.message : "Unable to start YouTube connection.");
+    }
+  }
+
+  async function handleYouTubeDisconnect() {
+    setYouTubeBusy(true);
+    setErrorMessage("");
+
+    try {
+      const response = await fetch("/api/youtube/disconnect", {
+        method: "POST",
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || "Unable to disconnect YouTube.");
+      }
+
+      setYouTubeAutoPublish(false);
+      await refreshYouTubeConnection();
+      setStatusMessage("YouTube account disconnected.");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Unable to disconnect YouTube.");
+    } finally {
+      setYouTubeBusy(false);
+    }
+  }
+
   async function handleRender(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!videoFile) {
-      setErrorMessage("Please upload a main video file.");
+    if (!logoFile) {
+      setErrorMessage("Upload an SVG logo in phase 1 first.");
+      setActivePhase(1);
       return;
+    }
+
+    if (!videoFile) {
+      setErrorMessage("Upload a video in phase 2 before producing.");
+      setActivePhase(2);
+      return;
+    }
+
+    if (!subtitleHighlightColor || !logoPalette.includes(subtitleHighlightColor)) {
+      setErrorMessage("Choose a subtitle highlight color from your logo palette in phase 1.");
+      setActivePhase(1);
+      return;
+    }
+
+    if (youtubeAutoPublish) {
+      if (!youtubeConnection?.configured) {
+        setErrorMessage("YouTube sync is not configured on the server.");
+        setActivePhase(3);
+        return;
+      }
+      if (!youtubeConnection.connected) {
+        setErrorMessage("Connect your YouTube account in phase 3 before enabling auto-post.");
+        setActivePhase(3);
+        return;
+      }
     }
 
     if (statusPollerRef.current) {
@@ -319,74 +449,67 @@ export default function Home() {
     }
 
     setErrorMessage("");
-    setSaveToMacError("");
-    setSavedToMacPath("");
     setResult(null);
+    setIsSubmitting(true);
     setRenderStatus({
       jobId: "",
       status: "queued",
       progress: 0,
       message: "Preparing render job...",
     });
-    setIsSubmitting(true);
+    setStatusMessage("Preparing render job...");
 
     try {
       const formData = new FormData();
-      if (videoFile) {
-        formData.append("video", videoFile);
-      }
-      if (draftId) {
-        formData.append("draftId", draftId);
-      }
-      if (logoFile) {
-        formData.append("logo", logoFile);
-      }
-      if (subtitleFile) {
-        formData.append("subtitleFile", subtitleFile);
-      }
-      if (generateTrailerIntroOutro && introMusicFile) {
-        formData.append("introMusic", introMusicFile);
-      }
-      if (generateTrailerIntroOutro && outroMusicFile) {
-        formData.append("outroMusic", outroMusicFile);
-      }
+      formData.append("video", videoFile);
+      formData.append("logo", logoFile);
 
-      formData.append(
-        "generateTrailerIntroOutro",
-        generateTrailerIntroOutro ? "true" : "false",
-      );
+      formData.append("generateTrailerIntroOutro", "true");
       formData.append("videoFormat", videoFormat);
-      formData.append("fontChoice", fontChoice);
-      formData.append("soundtrackChoice", soundtrackChoice);
-      formData.append("backgroundColor", backgroundColor);
-      formData.append("textColor", textColor);
-      formData.append("accentColor", accentColor);
-      if (generateTrailerIntroOutro) {
-        formData.append("trailerTitle", trailerTitle);
-        formData.append("trailerSubtitle", trailerSubtitle);
-        formData.append("trailerOutroTitle", trailerOutroTitle);
-        formData.append("trailerOutroSubtitle", trailerOutroSubtitle);
-        formData.append("outroCredits", outroCredits);
-        formData.append("trailerDuration", trailerDuration);
-      }
-      formData.append("lowerThirdTitle", lowerThirdTitle);
-      formData.append("lowerThirdSubtitle", lowerThirdSubtitle);
-      formData.append("lowerThirdStart", lowerThirdStart);
-      formData.append("lowerThirdDuration", lowerThirdDuration);
-      formData.append("subtitleFontChoice", subtitleFontChoice);
+      formData.append("fontChoice", "Poppins");
+      formData.append("soundtrackChoice", "theater-chime");
+      formData.append("backgroundColor", INTRO_OUTRO_BACKGROUND);
+      formData.append("textColor", "#ffffff");
+      formData.append("accentColor", "#ffffff");
+      formData.append("trailerTitle", "");
+      formData.append("trailerSubtitle", "");
+      formData.append("trailerOutroTitle", "");
+      formData.append("trailerOutroSubtitle", "");
+      formData.append("outroCredits", credits);
+      formData.append("trailerDuration", "3.5");
+      formData.append("lowerThirdTitle", "");
+      formData.append("lowerThirdSubtitle", "");
+      formData.append("lowerThirdStart", "0");
+      formData.append("lowerThirdDuration", "0");
+      formData.append("subtitleFontChoice", "Poppins");
+      formData.append("subtitleFontSize", "48");
+      formData.append("subtitleTextColor", "#ffffff");
       formData.append("subtitleHighlightColor", subtitleHighlightColor);
-      formData.append("renderSpeedMode", renderSpeedMode);
+      formData.append("renderSpeedMode", "turbo");
       formData.append("subtitleLanguage", "en");
+      formData.append("youtubeAutoPublish", youtubeAutoPublish ? "true" : "false");
+      formData.append(
+        "youtubeTitle",
+        youtubeTitle.trim() || stripFileExtension(videoFile.name).trim() || "Produced Video",
+      );
+      formData.append("youtubeDescription", youtubeDescription.trim());
+      formData.append("youtubePrivacyStatus", youtubePrivacyStatus);
+      formData.append("youtubeTags", youtubeTags.trim());
 
       const response = await fetch("/api/render", {
         method: "POST",
         body: formData,
       });
 
-      const payload = (await response.json()) as RenderResponse &
-        RenderStatusResponse & { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || "Render failed.");
+      const payload = (await response.json()) as
+        | (RenderResponse &
+            RenderStatusResponse & {
+              error?: string;
+            })
+        | { error?: string };
+
+      if (!response.ok || !("jobId" in payload)) {
+        throw new Error((payload as { error?: string }).error || "Unable to start render.");
       }
 
       setActiveRenderJobId(payload.jobId);
@@ -397,783 +520,574 @@ export default function Home() {
         message: payload.message ?? "Render started.",
       });
       setStatusMessage(payload.message ?? "Render started.");
-      setSaveToMacError("");
-      setSavedToMacPath("");
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Render failed.");
-      setStatusMessage("Render did not complete.");
       setIsSubmitting(false);
       setActiveRenderJobId(null);
       setRenderStatus(null);
+      setErrorMessage(error instanceof Error ? error.message : "Unable to start render.");
+      setStatusMessage("Render did not complete.");
     }
   }
 
-  async function handleSaveToMac() {
-    if (!result || isSavingToMac) {
-      return;
-    }
-
-    setIsSavingToMac(true);
-    setSaveToMacError("");
-    setSavedToMacPath("");
-
-    try {
-      const response = await fetch(`/api/save/${result.jobId}`, {
-        method: "POST",
-      });
-      const payload = (await response.json()) as SaveToMacResponse & { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || "Unable to save files to Mac safe folder.");
-      }
-
-      setSavedToMacPath(payload.destinationFolder);
-    } catch (error) {
-      setSaveToMacError(
-        error instanceof Error ? error.message : "Unable to save files to Mac safe folder.",
-      );
-    } finally {
-      setIsSavingToMac(false);
-    }
-  }
-
-  async function persistDraftAssets(input: {
-    subtitleFile?: File | null;
-    logoFile?: File | null;
-  }) {
-    if (!draftId) {
-      return;
-    }
-
-    const formData = new FormData();
-    if (input.subtitleFile) {
-      formData.append("subtitleFile", input.subtitleFile);
-    }
-    if (input.logoFile) {
-      formData.append("logo", input.logoFile);
-    }
-    if (![...formData.keys()].length) {
-      return;
-    }
-
-    try {
-      const response = await fetch(`/api/drafts/${draftId}/assets`, {
-        method: "POST",
-        body: formData,
-      });
-      const payload = (await response.json()) as {
-        subtitleFilename?: string;
-        logoFilename?: string;
-        error?: string;
-      };
-      if (!response.ok) {
-        throw new Error(payload.error || "Unable to save step 2 assets.");
-      }
-
-      setStep2SaveMessage(
-        `Saved to backend${payload.subtitleFilename ? ` | Subtitle: ${payload.subtitleFilename}` : ""}${payload.logoFilename ? ` | Logo: ${payload.logoFilename}` : ""}`,
-      );
-    } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : "Unable to save step 2 assets.",
-      );
-    }
-  }
-
-  async function handleGenerateSubtitlesFromStep1() {
-    if (!videoFile || isGeneratingSrt) {
-      return;
-    }
-
-    setIsGeneratingSrt(true);
-    setErrorMessage("");
-    setStep1SrtMessage("");
-
-    try {
-      const formData = new FormData();
-      formData.append("video", videoFile);
-      formData.append("subtitleLanguage", "en");
-
-      const response = await fetch("/api/subtitles/generate", {
-        method: "POST",
-        body: formData,
-      });
-      const payload = (await response.json()) as Step1SubtitleResponse & { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || "Unable to generate subtitle file.");
-      }
-
-      const generatedSubtitle = new File(
-        [payload.content],
-        payload.filename || "subtitles.srt",
-        { type: "application/x-subrip; charset=utf-8" },
-      );
-      setSubtitleFile(generatedSubtitle);
-      setDraftId(payload.draftId || "");
-      setStep2SaveMessage("Step 1 subtitle and source video saved to backend.");
-      setStep1SrtMessage(`Generated subtitle file: ${generatedSubtitle.name}`);
-      setWizardStep(2);
-      setStatusMessage("Step 1 complete. Subtitle file has been loaded into Step 2.");
-    } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : "Unable to generate subtitle file.",
-      );
-    } finally {
-      setIsGeneratingSrt(false);
-    }
-  }
+  const phase1Complete = Boolean(logoFile) && logoPalette.length > 0 && Boolean(subtitleHighlightColor);
+  const phase2Complete = Boolean(videoFile);
+  const phase2Unlocked = activePhase >= 2;
+  const phase3Unlocked = activePhase >= 3;
 
   return (
-    <main className="min-h-screen px-6 py-10 text-white sm:px-10">
-      <div className="mx-auto grid w-full max-w-6xl gap-6">
-        <section className="rounded-[2rem] border border-white/10 bg-[linear-gradient(160deg,rgba(255,255,255,0.1),rgba(255,255,255,0.04))] p-6">
-          <p className="text-xs uppercase tracking-[0.24em] text-white/45">Pipeline</p>
-
-          <div className="mt-5 grid gap-2 sm:grid-cols-4">
-            <button
-              type="button"
-              onClick={() => setWizardStep(1)}
-              className={`rounded-2xl border px-4 py-3 text-left text-sm transition ${
-                wizardStep === 1
-                  ? "border-orange-300/70 bg-orange-400/15 text-white"
-                  : "border-white/10 bg-black/20 text-white/70 hover:bg-black/30"
-              }`}
-            >
-              Step 1: Source Video
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (videoFile || draftId) {
-                  setWizardStep(2);
-                }
-              }}
-              className={`rounded-2xl border px-4 py-3 text-left text-sm transition ${
-                wizardStep === 2
-                  ? "border-orange-300/70 bg-orange-400/15 text-white"
-                  : "border-white/10 bg-black/20 text-white/70 hover:bg-black/30"
-              } ${videoFile || draftId ? "" : "cursor-not-allowed opacity-60"}`}
-            >
-              Step 2: Subtitles + Branding
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (videoFile || draftId) {
-                  setWizardStep(3);
-                }
-              }}
-              className={`rounded-2xl border px-4 py-3 text-left text-sm transition ${
-                wizardStep === 3
-                  ? "border-orange-300/70 bg-orange-400/15 text-white"
-                  : "border-white/10 bg-black/20 text-white/70 hover:bg-black/30"
-              } ${videoFile || draftId ? "" : "cursor-not-allowed opacity-60"}`}
-            >
-              Step 3: Render + Export
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (result) {
-                  setWizardStep(4);
-                }
-              }}
-              className={`rounded-2xl border px-4 py-3 text-left text-sm transition ${
-                wizardStep === 4
-                  ? "border-orange-300/70 bg-orange-400/15 text-white"
-                  : "border-white/10 bg-black/20 text-white/70 hover:bg-black/30"
-              } ${result ? "" : "cursor-not-allowed opacity-60"}`}
-            >
-              Step 4: Preview + Download
-            </button>
-          </div>
-
-          <form onSubmit={handleRender} className="mt-5 grid gap-4">
-            {wizardStep === 1 ? (
-              <>
-                <div className="grid gap-4">
-                  <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <span className="text-sm text-white/80">Main video upload</span>
-                    <input
-                      type="file"
-                      accept="video/*"
-                      onChange={(event) => {
-                        setVideoFile(event.target.files?.[0] ?? null);
-                        setSubtitleFile(null);
-                        setDraftId("");
-                        setStep2SaveMessage("");
-                        setStep1SrtMessage("");
-                      }}
-                      className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-orange-500 file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
-                    />
-                  </label>
-                  <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <span className="text-sm text-white/80">Output format</span>
-                    <select
-                      value={videoFormat}
-                      onChange={(event) =>
-                        setVideoFormat(event.target.value as "short" | "wide")
-                      }
-                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                    >
-                      <option value="short">Short (9:16, TikTok/Reels)</option>
-                      <option value="wide">Wide (16:9, YouTube landscape)</option>
-                    </select>
-                  </label>
-                </div>
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={handleGenerateSubtitlesFromStep1}
-                    disabled={!videoFile || isGeneratingSrt}
-                    className="inline-flex h-12 items-center justify-center rounded-full border border-emerald-300/50 bg-emerald-400/15 px-6 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/25 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isGeneratingSrt ? "Generating .srt..." : "Run speech-to-text (.srt)"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWizardStep(2)}
-                    disabled={!videoFile && !draftId}
-                    className="inline-flex h-12 items-center justify-center rounded-full bg-orange-500 px-6 text-sm font-semibold text-black transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Continue to Step 2
-                  </button>
-                </div>
-                {step1SrtMessage ? (
-                  <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-4 text-sm text-emerald-100">
-                    {step1SrtMessage}
-                  </div>
-                ) : null}
-              </>
-            ) : null}
-
-            {wizardStep === 2 ? (
-              <>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <span className="text-sm text-white/80">Logo upload (.svg only for crisp quality)</span>
-                    <input
-                      type="file"
-                      accept="image/svg+xml,.svg"
-                      onChange={(event) => {
-                        const nextLogo = event.target.files?.[0] ?? null;
-                        setLogoFile(nextLogo);
-                        void persistDraftAssets({ logoFile: nextLogo });
-                      }}
-                      className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
-                    />
-                  </label>
-
-                  <label className="grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <span className="text-sm text-white/80">Subtitle file upload (.srt)</span>
-                    <input
-                      ref={subtitleInputRef}
-                      type="file"
-                      accept=".srt,text/plain"
-                      onChange={(event) => {
-                        const nextSubtitle = event.target.files?.[0] ?? null;
-                        setSubtitleFile(nextSubtitle);
-                        void persistDraftAssets({ subtitleFile: nextSubtitle });
-                      }}
-                      className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-emerald-300 file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
-                    />
-                  </label>
-                </div>
-
-                {subtitleFile ? (
-                  <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-3 text-xs text-emerald-100">
-                    Active subtitle file: {subtitleFile.name}
-                  </div>
-                ) : null}
-                {draftId ? (
-                  <div className="rounded-2xl border border-white/15 bg-black/20 p-3 text-xs text-white/75">
-                    Backend draft: {draftId}
-                  </div>
-                ) : null}
-                {step2SaveMessage ? (
-                  <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-3 text-xs text-emerald-100">
-                    {step2SaveMessage}
-                  </div>
-                ) : null}
-
-                <div className="grid gap-4 rounded-2xl border border-emerald-300/25 bg-emerald-400/10 p-4 md:grid-cols-2">
-                  <label className="grid gap-2">
-                    <span className="text-sm text-emerald-100">Subtitle font (30 options)</span>
-                    <select
-                      value={subtitleFontChoice}
-                      onChange={(event) =>
-                        setSubtitleFontChoice(
-                          event.target.value as (typeof googleFonts)[number],
-                        )
-                      }
-                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                    >
-                      {googleFonts.map((font) => (
-                        <option key={font} value={font}>
-                          {font}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="grid gap-2">
-                    <span className="text-sm text-emerald-100">Subtitle highlighter color</span>
-                    <input
-                      type="color"
-                      value={subtitleHighlightColor}
-                      onChange={(event) => setSubtitleHighlightColor(event.target.value)}
-                      className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
-                    />
-                  </label>
-                </div>
-
-                <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-6">
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Background color</span>
-                    <input
-                      type="color"
-                      value={backgroundColor}
-                      onChange={(event) => setBackgroundColor(event.target.value)}
-                      className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
-                    />
-                  </label>
-
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Text color</span>
-                    <input
-                      type="color"
-                      value={textColor}
-                      onChange={(event) => setTextColor(event.target.value)}
-                      className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
-                    />
-                  </label>
-
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Accent color</span>
-                    <input
-                      type="color"
-                      value={accentColor}
-                      onChange={(event) => setAccentColor(event.target.value)}
-                      className="h-11 w-full rounded-xl border border-white/15 bg-transparent"
-                    />
-                  </label>
-
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Google font (30)</span>
-                    <select
-                      value={fontChoice}
-                      onChange={(event) =>
-                        setFontChoice(event.target.value as (typeof googleFonts)[number])
-                      }
-                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                    >
-                      {googleFonts.map((font) => (
-                        <option key={font} value={font}>
-                          {font}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Render quality</span>
-                    <select
-                      value={qualityProfile}
-                      onChange={(event) =>
-                        setQualityProfile(event.target.value as "fast" | "balanced" | "high")
-                      }
-                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                    >
-                      <option value="fast">Fast</option>
-                      <option value="balanced">Balanced</option>
-                      <option value="high">High (crispest)</option>
-                    </select>
-                  </label>
-
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Intro/outro song</span>
-                    <select
-                      value={soundtrackChoice}
-                      onChange={(event) =>
-                        setSoundtrackChoice(
-                          event.target.value as
-                            | "startup-chime"
-                            | "spirited-blues"
-                            | "theater-chime"
-                            | "trailer-braam"
-                            | "piano-lift",
-                        )
-                      }
-                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                    >
-                      <option value="theater-chime">Theater Chime (cinema)</option>
-                      <option value="trailer-braam">Trailer Braam (epic)</option>
-                      <option value="piano-lift">Piano Lift (emotional)</option>
-                      <option value="spirited-blues">Spirited Blues</option>
-                      <option value="startup-chime">Startup Chime</option>
-                    </select>
-                  </label>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
-                  Subtitle pipeline mode: Step 3 extracts audio, transcribes speech, generates
-                  `.srt`, and burns subtitles directly into the video.
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setWizardStep(1)}
-                    className="inline-flex h-12 items-center justify-center rounded-full border border-white/20 bg-transparent px-6 text-sm font-semibold text-white transition hover:bg-white/10"
-                  >
-                    Back
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWizardStep(3)}
-                    className="inline-flex h-12 items-center justify-center rounded-full bg-orange-500 px-6 text-sm font-semibold text-black transition hover:bg-orange-400"
-                  >
-                    Continue to Step 3
-                  </button>
-                </div>
-              </>
-            ) : null}
-
-            {wizardStep === 3 ? (
-              <>
-                <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-2">
-                  <label className="inline-flex items-start gap-3 rounded-2xl border border-white/10 bg-black/20 p-4 md:col-span-2">
-                    <input
-                      type="checkbox"
-                      checked={generateTrailerIntroOutro}
-                      onChange={(event) => {
-                        const enabled = event.target.checked;
-                        setGenerateTrailerIntroOutro(enabled);
-                        if (!enabled) {
-                          setIntroMusicFile(null);
-                          setOutroMusicFile(null);
-                        }
-                      }}
-                      className="mt-1 h-4 w-4 rounded border-white/30 bg-transparent accent-orange-500"
-                    />
-                    <span className="text-sm text-white/90">
-                      Generate cinematic intro and outro clips (turn off to reduce render time)
-                    </span>
-                  </label>
-                  {generateTrailerIntroOutro ? (
-                    <>
-                      <label className="grid gap-2">
-                        <span className="text-sm text-white/80">Intro title</span>
-                        <input
-                          value={trailerTitle}
-                          onChange={(event) => setTrailerTitle(event.target.value)}
-                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                        />
-                      </label>
-                      <label className="grid gap-2">
-                        <span className="text-sm text-white/80">Intro line 2</span>
-                        <input
-                          value={trailerSubtitle}
-                          onChange={(event) => setTrailerSubtitle(event.target.value)}
-                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                        />
-                      </label>
-                      <label className="grid gap-2">
-                        <span className="text-sm text-white/80">Outro title</span>
-                        <input
-                          value={trailerOutroTitle}
-                          onChange={(event) => setTrailerOutroTitle(event.target.value)}
-                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                        />
-                      </label>
-                      <label className="grid gap-2">
-                        <span className="text-sm text-white/80">Outro line 2</span>
-                        <input
-                          value={trailerOutroSubtitle}
-                          onChange={(event) => setTrailerOutroSubtitle(event.target.value)}
-                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                        />
-                      </label>
-                      <label className="grid gap-2 md:col-span-2">
-                        <span className="text-sm text-white/80">
-                          Outro credits (one name per line)
-                        </span>
-                        <textarea
-                          value={outroCredits}
-                          onChange={(event) => setOutroCredits(event.target.value)}
-                          rows={4}
-                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                        />
-                      </label>
-                      <label className="grid gap-2 md:col-span-2">
-                        <span className="text-sm text-white/80">
-                          Intro/Outro duration (seconds)
-                        </span>
-                        <input
-                          type="number"
-                          min="1.2"
-                          max="12"
-                          step="0.1"
-                          value={trailerDuration}
-                          onChange={(event) => setTrailerDuration(event.target.value)}
-                          className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                        />
-                      </label>
-                      <label className="grid gap-2">
-                        <span className="text-sm text-white/80">
-                          Intro music upload (optional, overrides song list)
-                        </span>
-                        <input
-                          type="file"
-                          accept="audio/*"
-                          onChange={(event) => setIntroMusicFile(event.target.files?.[0] ?? null)}
-                          className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
-                        />
-                      </label>
-                      <label className="grid gap-2">
-                        <span className="text-sm text-white/80">
-                          Outro music upload (optional, overrides song list)
-                        </span>
-                        <input
-                          type="file"
-                          accept="audio/*"
-                          onChange={(event) => setOutroMusicFile(event.target.files?.[0] ?? null)}
-                          className="block text-sm text-white file:mr-4 file:rounded-full file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-medium file:text-black"
-                        />
-                      </label>
-                    </>
-                  ) : (
-                    <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-sm text-white/70 md:col-span-2">
-                      Intro/outro clip customization is hidden while cinematic intro/outro is off.
-                    </div>
-                  )}
-                </div>
-
-                <div className="grid gap-4 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-2">
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Lower third (bottom-right): line 1</span>
-                    <input
-                      value={lowerThirdTitle}
-                      onChange={(event) => setLowerThirdTitle(event.target.value)}
-                      className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                    />
-                  </label>
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Lower third (bottom-right): line 2</span>
-                    <input
-                      value={lowerThirdSubtitle}
-                      onChange={(event) => setLowerThirdSubtitle(event.target.value)}
-                      className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                    />
-                  </label>
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Lower third start (sec)</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.1"
-                      value={lowerThirdStart}
-                      onChange={(event) => setLowerThirdStart(event.target.value)}
-                      className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                    />
-                  </label>
-                  <label className="grid gap-2">
-                    <span className="text-sm text-white/80">Lower third duration (sec)</span>
-                    <input
-                      type="number"
-                      min="0.5"
-                      step="0.1"
-                      value={lowerThirdDuration}
-                      onChange={(event) => setLowerThirdDuration(event.target.value)}
-                      className="rounded-xl border border-white/15 bg-[#111827] px-3 py-2.5 text-white"
-                    />
-                  </label>
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
-                  Step 3 runs the render and then lets you download or save output files to your
-                  Mac safe folder.
-                </div>
-                <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-4 text-sm text-emerald-100">
-                  Subtitle burn style: {subtitleFontChoice}, Apple-style size{" "}
-                  {appleSubtitleFontSize}px, highlight {subtitleHighlightColor}.
-                </div>
-                <div className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-4">
-                  <label className="grid gap-2">
-                    <span className="text-sm font-medium text-emerald-100">
-                      Render speed mode
-                    </span>
-                    <select
-                      value={renderSpeedMode}
-                      onChange={(event) =>
-                        setRenderSpeedMode(
-                          event.target.value as "turbo" | "balanced" | "quality",
-                        )
-                      }
-                      className="h-11 rounded-xl border border-white/15 bg-[#111827] px-3 text-white"
-                    >
-                      <option value="turbo">Turbo (fastest, hardware encode)</option>
-                      <option value="balanced">Balanced</option>
-                      <option value="quality">Quality</option>
-                    </select>
-                  </label>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setWizardStep(2)}
-                    className="inline-flex h-12 items-center justify-center rounded-full border border-white/20 bg-transparent px-6 text-sm font-semibold text-white transition hover:bg-white/10"
-                  >
-                    Back
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    className="inline-flex h-12 items-center justify-center rounded-full bg-orange-500 px-6 text-sm font-semibold text-black transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isSubmitting ? "Rendering..." : "Render Trailer Video"}
-                  </button>
-                </div>
-                {result ? (
-                  <button
-                    type="button"
-                    onClick={() => setWizardStep(4)}
-                    className="inline-flex h-12 w-fit items-center justify-center rounded-full border border-emerald-300/50 bg-emerald-400/15 px-6 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/25"
-                  >
-                    Open Step 4 Preview
-                  </button>
-                ) : null}
-              </>
-            ) : null}
-
-            {wizardStep === 4 ? (
-              <>
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                  <p className="text-sm text-white/85">
-                    Preview the rendered video before downloading. If changes are needed, go back
-                    to Step 2 or Step 3.
-                  </p>
-                </div>
-
-                {result?.previewUrl ? (
-                  <div className="overflow-hidden rounded-2xl border border-white/15 bg-black/40">
-                    <video
-                      key={result.jobId}
-                      controls
-                      preload="metadata"
-                      className="h-auto w-full"
-                      src={result.previewUrl}
-                    />
-                  </div>
-                ) : (
-                  <div className="rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-5 text-sm text-white/70">
-                    Render a video in Step 3 first, then preview it here.
-                  </div>
-                )}
-
-                {result ? (
-                  <div className="grid gap-3 sm:grid-cols-1">
-                    <a
-                      className="inline-flex h-11 items-center justify-center rounded-full bg-white px-5 text-sm font-semibold text-black transition hover:bg-orange-100"
-                      href={result.downloadUrl}
-                    >
-                      Download video
-                    </a>
-                  </div>
-                ) : null}
-
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setWizardStep(2)}
-                    className="inline-flex h-11 items-center justify-center rounded-full border border-white/20 bg-transparent px-5 text-sm font-semibold text-white transition hover:bg-white/10"
-                  >
-                    Back to Step 2
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWizardStep(3)}
-                    className="inline-flex h-11 items-center justify-center rounded-full border border-white/20 bg-transparent px-5 text-sm font-semibold text-white transition hover:bg-white/10"
-                  >
-                    Back to Step 3
-                  </button>
-                </div>
-              </>
-            ) : null}
-          </form>
+    <main className="relative min-h-screen overflow-hidden px-6 py-10 text-[#e6edf1] sm:px-10">
+      <img
+        src="/design.svg"
+        alt="Design mark"
+        className="pointer-events-none absolute left-7 top-7 h-10 w-auto object-contain sm:left-16 sm:top-7 sm:h-12"
+      />
+      <div className="mx-auto w-full max-w-5xl space-y-6">
+        <section className="rounded-3xl border border-[#667684]/35 bg-[#1e272f]/72 p-6">
+          <h1 className="text-2xl font-semibold">3-Phase Video Platform</h1>
+          <p className="mt-2 text-sm text-[#b8c3cb]">
+            1. Intro/Outro maker 2. Upload video 3. Add subtitles and produce.
+          </p>
         </section>
 
-        <section className="rounded-[2rem] border border-white/10 bg-black/25 p-6">
-          <p className="text-xs uppercase tracking-[0.24em] text-white/45">Export</p>
+        <form onSubmit={handleRender} className="space-y-6">
+          <section className="rounded-3xl border border-[#667684]/35 bg-[#1e272f]/72 p-6">
+            <p className="text-xs uppercase tracking-[0.2em] text-[#94a1ac]">Phase 1</p>
+            <h2 className="mt-1 text-xl font-semibold">Intro & Outro Maker</h2>
+            <p className="mt-2 text-sm text-[#b8c3cb]">
+              One option only: SVG logo fades from white to full color on background
+              <span className="font-semibold text-[#e6edf1]"> {INTRO_OUTRO_BACKGROUND}</span>.
+            </p>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <label className="grid gap-2 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+                <span className="text-sm text-[#d6dde2]">Upload logo (.svg)</span>
+                <input
+                  type="file"
+                  accept="image/svg+xml,.svg"
+                  onChange={(event) => {
+                    const nextFile = event.target.files?.[0] ?? null;
+                    if (nextFile) {
+                      const lower = nextFile.name.toLowerCase();
+                      const isSvg = nextFile.type === "image/svg+xml" || lower.endsWith(".svg");
+                      if (!isSvg) {
+                        setLogoFile(null);
+                        setErrorMessage("Logo must be an SVG file (.svg).");
+                        return;
+                      }
+                    }
+
+                    setErrorMessage("");
+                    setLogoFile(nextFile);
+                    setVideoFile(null);
+                    setResult(null);
+                    setRenderStatus(null);
+                    setStatusMessage("Phase 1 ready. Review the preview, then continue to phase 2.");
+                    setActivePhase(1);
+                  }}
+                  className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#aab6bf] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[#161d22]"
+                />
+              </label>
+
+              <div className="rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+                <p className="text-sm text-[#d6dde2]">Preview (Intro + Outro)</p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  {["Intro", "Outro"].map((label) => (
+                    <div key={label} className="rounded-xl border border-[#3a4752]/55 p-2">
+                      <p className="mb-2 text-center text-xs uppercase tracking-[0.12em] text-[#95a3ae]">
+                        {label}
+                      </p>
+                      <div
+                        className="flex h-36 items-center justify-center rounded-lg"
+                        style={{ backgroundColor: INTRO_OUTRO_BACKGROUND }}
+                      >
+                        {logoPreviewUrl ? (
+                          <div className="relative h-24 w-24 sm:h-28 sm:w-28">
+                            <img
+                              src={logoPreviewUrl}
+                              alt="Brand logo full color"
+                              className="preview-color-layer absolute inset-0 h-full w-full object-contain"
+                            />
+                            <img
+                              src={logoPreviewUrl}
+                              alt="Brand logo white"
+                              className="preview-white-layer absolute inset-0 h-full w-full object-contain"
+                            />
+                          </div>
+                        ) : (
+                          <span className="text-xs text-[#d7dee3]/80">Upload SVG to preview</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <p className="text-sm text-[#d6dde2]">Subtitle highlight color (from logo only)</p>
+              {logoPalette.length > 0 ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {logoPalette.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      onClick={() => setSubtitleHighlightColor(color)}
+                      className={`h-10 w-10 rounded-full border-2 transition ${
+                        subtitleHighlightColor === color
+                          ? "border-[#d2d9de]"
+                          : "border-[#7a8a97]/55 hover:border-[#c4ced5]/70"
+                      }`}
+                      style={{ backgroundColor: color }}
+                      aria-label={`Pick ${color}`}
+                      title={color}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-[#a8b4be]">
+                  Upload SVG to extract available brand colors.
+                </p>
+              )}
+              {subtitleHighlightColor ? (
+                <p className="mt-2 text-xs text-[#b1bcc5]">
+                  Selected subtitle highlight:{" "}
+                  <span className="font-semibold text-[#e6edf1]">{subtitleHighlightColor}</span>
+                </p>
+              ) : null}
+              {logoPaletteError ? (
+                <p className="mt-2 text-xs text-amber-200">{logoPaletteError}</p>
+              ) : null}
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                disabled={!phase1Complete}
+                onClick={() => {
+                  if (!phase1Complete) {
+                    setErrorMessage(
+                      logoPaletteError || "Upload an SVG logo with usable brand colors first.",
+                    );
+                    return;
+                  }
+                  setErrorMessage("");
+                  setActivePhase(2);
+                  setStatusMessage("Phase 2 unlocked. Upload your video.");
+                }}
+                className="inline-flex h-11 items-center justify-center rounded-full bg-[#aab6bf] px-5 text-sm font-semibold text-[#161d22] transition hover:bg-[#bec8cf] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                Continue to Phase 2
+              </button>
+            </div>
+          </section>
+
+          <section
+            className={`rounded-3xl border border-[#667684]/35 bg-[#1e272f]/72 p-6 ${
+              phase2Unlocked ? "" : "opacity-55"
+            }`}
+          >
+            <p className="text-xs uppercase tracking-[0.2em] text-[#94a1ac]">Phase 2</p>
+            <h2 className="mt-1 text-xl font-semibold">Upload Video</h2>
+
+            <label className="mt-4 grid gap-2 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <span className="text-sm text-[#d6dde2]">Main video file</span>
+              <input
+                type="file"
+                accept="video/*"
+                disabled={!phase2Unlocked}
+                onChange={(event) => {
+                  const nextFile = event.target.files?.[0] ?? null;
+                  setVideoFile(nextFile);
+                  setResult(null);
+                  setRenderStatus(null);
+                  if (nextFile) {
+                    setErrorMessage("");
+                    setStatusMessage("Phase 2 ready. Continue to phase 3 for subtitles and render.");
+                  }
+                }}
+                className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#aab6bf] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[#161d22] disabled:opacity-55"
+              />
+              {videoFile ? <span className="text-xs text-[#b1bcc5]">Selected: {videoFile.name}</span> : null}
+            </label>
+
+            <div className="mt-4 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <p className="text-sm text-[#d6dde2]">Video format</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={!phase2Unlocked}
+                  onClick={() => setVideoFormat("short")}
+                  className={`inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-semibold transition ${
+                    videoFormat === "short"
+                      ? "bg-[#aab6bf] text-[#161d22]"
+                      : "border border-[#7a8a97]/55 bg-transparent text-[#dbe2e8] hover:bg-[#9ba9b3]/15"
+                  } disabled:cursor-not-allowed disabled:opacity-55`}
+                >
+                  TikTok (9:16)
+                </button>
+                <button
+                  type="button"
+                  disabled={!phase2Unlocked}
+                  onClick={() => setVideoFormat("wide")}
+                  className={`inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-semibold transition ${
+                    videoFormat === "wide"
+                      ? "bg-[#aab6bf] text-[#161d22]"
+                      : "border border-[#7a8a97]/55 bg-transparent text-[#dbe2e8] hover:bg-[#9ba9b3]/15"
+                  } disabled:cursor-not-allowed disabled:opacity-55`}
+                >
+                  Landscape (16:9)
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => setActivePhase(1)}
+                className="inline-flex h-11 items-center justify-center rounded-full border border-[#7a8a97]/45 px-5 text-sm font-semibold text-[#dde4e9] transition hover:bg-[#9ba9b3]/15"
+              >
+                Back to Phase 1
+              </button>
+              <button
+                type="button"
+                disabled={!phase2Unlocked || !phase2Complete}
+                onClick={() => {
+                  if (!videoFile) {
+                    setErrorMessage("Upload your video before continuing.");
+                    return;
+                  }
+                  setErrorMessage("");
+                  setActivePhase(3);
+                  setStatusMessage("Phase 3 unlocked. Add subtitles and produce.");
+                }}
+                className="inline-flex h-11 items-center justify-center rounded-full bg-[#aab6bf] px-5 text-sm font-semibold text-[#161d22] transition hover:bg-[#bec8cf] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                Continue to Phase 3
+              </button>
+            </div>
+          </section>
+
+          <section
+            className={`rounded-3xl border border-[#667684]/35 bg-[#1e272f]/72 p-6 ${
+              phase3Unlocked ? "" : "opacity-55"
+            }`}
+          >
+            <p className="text-xs uppercase tracking-[0.2em] text-[#94a1ac]">Phase 3</p>
+            <h2 className="mt-1 text-xl font-semibold">Add Subtitles & Produce</h2>
+
+            <div className="mt-4 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <p className="text-sm text-[#d6dde2]">Subtitles are auto-generated from video audio.</p>
+              <p className="mt-1 text-xs text-[#a8b4be]">
+                Highlight color is locked to your logo palette:
+                <span className="font-semibold text-[#e6edf1]"> {subtitleHighlightColor || "not selected"}</span>.
+              </p>
+            </div>
+
+            <label className="mt-4 grid gap-2 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <span className="text-sm text-[#d6dde2]">Credits</span>
+              <textarea
+                value={credits}
+                onChange={(event) => setCredits(event.target.value)}
+                rows={4}
+                placeholder="Enter one credit per line"
+                className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-[#e6edf1]"
+              />
+              <span className="text-xs text-[#9eabb6]">
+                These lines will appear below the logo in the outro.
+              </span>
+            </label>
+
+            <div className="mt-4 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <p className="text-sm text-[#d6dde2]">YouTube Sync</p>
+
+              {!youtubeConnection?.configured ? (
+                <p className="mt-2 text-xs text-amber-200">
+                  Set <span className="font-semibold text-[#e6edf1]">YOUTUBE_CLIENT_ID</span> and{" "}
+                  <span className="font-semibold text-[#e6edf1]">YOUTUBE_CLIENT_SECRET</span> on the
+                  server to enable YouTube posting.
+                </p>
+              ) : null}
+
+              {youtubeConnection?.configured && !youtubeConnection.connected ? (
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={youtubeBusy}
+                    onClick={handleYouTubeConnect}
+                    className="inline-flex h-10 items-center justify-center rounded-full bg-[#aab6bf] px-4 text-sm font-semibold text-[#161d22] transition hover:bg-[#bec8cf] disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    {youtubeBusy ? "Connecting..." : "Connect YouTube"}
+                  </button>
+                  <span className="text-xs text-[#b1bcc5]">
+                    {youtubeConnection.message || "Connect your account to enable auto-post."}
+                  </span>
+                </div>
+              ) : null}
+
+              {youtubeConnection?.configured && youtubeConnection.connected ? (
+                <div className="mt-3 space-y-3">
+                  <div className="flex flex-wrap items-center gap-3 text-xs text-[#bcc7cf]">
+                    <span>
+                      Connected:
+                      <span className="font-semibold text-[#e6edf1]">
+                        {" "}
+                        {youtubeConnection.channelTitle || youtubeConnection.channelId || "YouTube account"}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      disabled={youtubeBusy}
+                      onClick={handleYouTubeDisconnect}
+                      className="inline-flex h-9 items-center justify-center rounded-full border border-[#7a8a97]/45 px-3 text-xs font-semibold text-[#dde4e9] transition hover:bg-[#9ba9b3]/15 disabled:cursor-not-allowed disabled:opacity-55"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-sm text-[#d0d8de]">
+                    <input
+                      type="checkbox"
+                      checked={youtubeAutoPublish}
+                      onChange={(event) => setYouTubeAutoPublish(event.target.checked)}
+                      className="h-4 w-4 rounded border-[#7a8a97]/55 bg-transparent"
+                    />
+                    Auto-post this render to YouTube
+                  </label>
+
+                  {youtubeAutoPublish ? (
+                    <div className="grid gap-3">
+                      <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
+                        <span>YouTube title</span>
+                        <input
+                          type="text"
+                          maxLength={100}
+                          value={youtubeTitle}
+                          onChange={(event) => setYouTubeTitle(event.target.value)}
+                          className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
+                        />
+                      </label>
+                      <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
+                        <span>Description</span>
+                        <textarea
+                          rows={3}
+                          maxLength={5000}
+                          value={youtubeDescription}
+                          onChange={(event) => setYouTubeDescription(event.target.value)}
+                          className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
+                        />
+                      </label>
+                      <div className="grid gap-1.5 text-xs text-[#b8c3cb]">
+                        <span>Privacy</span>
+                        <div className="flex flex-wrap gap-2">
+                          {(["private", "unlisted", "public"] as const).map((value) => (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => setYouTubePrivacyStatus(value)}
+                              className={`inline-flex h-9 items-center justify-center rounded-full px-3 text-xs font-semibold transition ${
+                                youtubePrivacyStatus === value
+                                  ? "bg-[#aab6bf] text-[#161d22]"
+                                  : "border border-[#7a8a97]/55 text-[#e6edf1] hover:bg-[#9ba9b3]/15"
+                              }`}
+                            >
+                              {value}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
+                        <span>Tags (comma separated, optional)</span>
+                        <input
+                          type="text"
+                          value={youtubeTags}
+                          onChange={(event) => setYouTubeTags(event.target.value)}
+                          className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
+                          placeholder="brand, interview, wellness"
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => setActivePhase(2)}
+                className="inline-flex h-11 items-center justify-center rounded-full border border-[#7a8a97]/45 px-5 text-sm font-semibold text-[#dde4e9] transition hover:bg-[#9ba9b3]/15"
+              >
+                Back to Phase 2
+              </button>
+              <button
+                type="submit"
+                disabled={
+                  !phase3Unlocked ||
+                  !logoFile ||
+                  !videoFile ||
+                  isSubmitting ||
+                  (youtubeAutoPublish && !youtubeConnection?.connected)
+                }
+                className="inline-flex h-11 items-center justify-center rounded-full bg-[#aab6bf] px-5 text-sm font-semibold text-[#161d22] transition hover:bg-[#bec8cf] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {isSubmitting ? "Producing..." : "Produce Video"}
+              </button>
+            </div>
+          </section>
+        </form>
+
+        <section className="rounded-3xl border border-[#667684]/35 bg-[#1e272f]/72 p-6">
+          <h3 className="text-lg font-semibold">Render Status</h3>
+          <p className="mt-2 text-sm text-[#bcc7cf]">{statusMessage}</p>
 
           {renderStatus ? (
-            <div className="mt-5 space-y-3 rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-5">
-              <div className="flex items-center justify-between text-sm uppercase tracking-[0.12em] text-white/70">
-                <span>Render {renderStatus.status}</span>
+            <div className="mt-4 space-y-2 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <div className="flex items-center justify-between text-sm text-[#bcc7cf]">
+                <span>{renderStatus.status.toUpperCase()}</span>
                 <span>{renderStatus.progress}%</span>
               </div>
-              <p className="text-sm text-white/85">{renderStatus.message}</p>
-              <div className="h-2.5 w-full overflow-hidden rounded-full bg-white/15">
+              <div className="h-2.5 w-full overflow-hidden rounded-full bg-[#83919c]/35">
                 <div
                   className={`h-full rounded-full transition-all ${
-                    renderStatus.status === "failed"
-                      ? "bg-red-400"
-                      : "bg-gradient-to-r from-orange-400 to-emerald-300"
+                    renderStatus.status === "failed" ? "bg-red-400" : "bg-[#aab6bf]"
                   }`}
                   style={{ width: `${renderStatus.progress}%` }}
                 />
               </div>
+              <p className="text-xs text-[#b1bcc5]">{renderStatus.message}</p>
+              {renderStatus.youtube ? (
+                <div className="rounded-xl border border-[#5f6e7b]/40 bg-[#2b3640]/70 p-3">
+                  <p className="text-xs text-[#b1bcc5]">
+                    YouTube:{" "}
+                    <span className="font-semibold text-[#e6edf1]">
+                      {renderStatus.youtube.status.toUpperCase()}
+                    </span>
+                  </p>
+                  <p className="mt-1 text-xs text-[#b8c3cb]">{renderStatus.youtube.message}</p>
+                  {renderStatus.youtube.videoUrl ? (
+                    <a
+                      href={renderStatus.youtube.videoUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-flex text-xs font-semibold text-[#ccd6dd] underline-offset-2 hover:underline"
+                    >
+                      Open on YouTube
+                    </a>
+                  ) : null}
+                  {renderStatus.youtube.error ? (
+                    <p className="mt-1 text-xs text-red-200">{renderStatus.youtube.error}</p>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
-          ) : (
-            <div className="mt-5 rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-5 text-sm leading-7 text-white/75">
-              {statusMessage}
-            </div>
-          )}
+          ) : null}
 
           {errorMessage ? (
-            <div className="mt-4 rounded-2xl border border-red-400/30 bg-red-400/12 p-4 text-sm leading-7 text-red-100">
+            <div className="mt-4 rounded-2xl border border-red-400/35 bg-red-400/10 p-3 text-sm text-red-100">
               {errorMessage}
             </div>
           ) : null}
 
           {result ? (
-            <div className="mt-4 space-y-4">
-              <div className="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-4">
-                <p className="text-sm text-emerald-100">Render ready</p>
-                <p className="mt-2 text-xl font-semibold text-white">{result.filename}</p>
-                <p className="mt-2 text-sm text-white/70">
-                  Output size: {formatBytes(result.sizeInBytes)}
-                </p>
+            <div className="mt-5 space-y-4 rounded-2xl border border-[#90a0ad]/45 bg-[#aab6bf]/10 p-4">
+              <div>
+                <p className="text-sm text-[#d5dde3]">Render complete</p>
+                <p className="text-lg font-semibold text-[#e6edf1]">{result.filename}</p>
+                <p className="text-xs text-[#b8c3cb]">Size: {formatBytes(result.sizeInBytes)}</p>
               </div>
-              <a
-                className="inline-flex w-full items-center justify-center rounded-full bg-white px-6 py-3 text-sm font-semibold text-black transition hover:bg-orange-100"
-                href={result.downloadUrl}
-              >
-                Download final video
-              </a>
-              <button
-                type="button"
-                onClick={handleSaveToMac}
-                disabled={isSavingToMac}
-                className="inline-flex w-full items-center justify-center rounded-full border border-emerald-300/50 bg-emerald-400/15 px-6 py-3 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/25 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isSavingToMac
-                  ? "Saving to Mac safe folder..."
-                  : "Step 3: Save files to Mac safe folder"}
-              </button>
-              {savedToMacPath ? (
-                <p className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 p-3 text-xs leading-6 text-emerald-100">
-                  Saved to: {savedToMacPath}
-                </p>
+
+              {result.previewUrl ? (
+                <div className="overflow-hidden rounded-2xl border border-[#667684]/35 bg-[#2b3640]/78">
+                  <video
+                    key={result.jobId}
+                    controls
+                    preload="metadata"
+                    className="h-auto w-full"
+                    src={result.previewUrl}
+                  />
+                </div>
               ) : null}
-              {saveToMacError ? (
-                <p className="rounded-2xl border border-red-400/30 bg-red-400/12 p-3 text-xs leading-6 text-red-100">
-                  {saveToMacError}
-                </p>
+
+              <a
+                href={result.downloadUrl}
+                className="inline-flex h-11 items-center justify-center rounded-full bg-[#aab6bf] px-5 text-sm font-semibold text-[#161d22] transition hover:bg-[#bec8cf]"
+              >
+                Download Final Video
+              </a>
+
+              {renderStatus?.youtube?.videoUrl ? (
+                <a
+                  href={renderStatus.youtube.videoUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex h-11 items-center justify-center rounded-full border border-[#90a0ad]/50 px-5 text-sm font-semibold text-[#d5dde3] transition hover:bg-[#8f9ca7]/15"
+                >
+                  Open on YouTube
+                </a>
               ) : null}
             </div>
           ) : null}
         </section>
       </div>
+
+      <style jsx>{`
+        .preview-color-layer {
+          animation: preview-logo-color-in 2.8s cubic-bezier(0.2, 0.78, 0.3, 1) infinite;
+          transform-origin: center;
+          image-rendering: -webkit-optimize-contrast;
+          image-rendering: crisp-edges;
+        }
+
+        .preview-white-layer {
+          filter: brightness(0) saturate(100%) invert(100%);
+          animation: preview-logo-white-out 2.8s cubic-bezier(0.2, 0.78, 0.3, 1) infinite;
+          transform-origin: center;
+          image-rendering: -webkit-optimize-contrast;
+          image-rendering: crisp-edges;
+        }
+
+        @keyframes preview-logo-color-in {
+          0% {
+            opacity: 0.14;
+            transform: scale(0.92);
+            filter: saturate(82%) brightness(1.1);
+          }
+          35% {
+            opacity: 0.42;
+            transform: scale(0.95);
+            filter: saturate(88%) brightness(1.07);
+          }
+          68% {
+            opacity: 1;
+            transform: scale(1);
+            filter: none;
+          }
+          100% {
+            opacity: 1;
+            transform: scale(1);
+            filter: none;
+          }
+        }
+
+        @keyframes preview-logo-white-out {
+          0% {
+            opacity: 1;
+            transform: scale(0.92);
+          }
+          35% {
+            opacity: 0.78;
+            transform: scale(0.95);
+          }
+          68% {
+            opacity: 0;
+            transform: scale(1);
+          }
+          100% {
+            opacity: 0;
+            transform: scale(1);
+          }
+        }
+      `}</style>
     </main>
   );
 }

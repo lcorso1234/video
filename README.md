@@ -16,6 +16,84 @@ bun dev
 
 Open [http://localhost:3004](http://localhost:3004) with your browser to see the result.
 
+## Fast Backend Branding Test
+
+Run the server in one terminal:
+
+```bash
+npm run dev
+```
+
+Run a branding-only backend render test in another terminal:
+
+```bash
+npm run test:brand -- ./path/to/logo.svg
+```
+
+This script:
+1. Creates a tiny source clip automatically.
+2. Queues a backend render against `/api/render`.
+3. Polls `/api/render/:jobId` until complete.
+4. Downloads the output as `brand-test-<jobId>.mp4` in the project root.
+
+Optional flags:
+
+```bash
+npm run test:brand -- ./path/to/logo.svg --host http://127.0.0.1:3004 --out /tmp/brand-test.mp4 --format short
+```
+
+`--format` accepts `wide` (1920x1080) or `short` (1080x1920).
+
+## Auto-Subtitles E2E Test (No SRT Upload)
+
+Run a full end-to-end test for the no-SRT flow:
+
+```bash
+npm run test:auto-subtitles -- ./path/to/logo.svg
+```
+
+This script:
+1. Uses macOS `say` to generate spoken audio.
+2. Builds a temporary source video with that speech.
+3. Queues `/api/render` without uploading a subtitle file.
+4. Waits for completion, then downloads both `.mp4` and `.srt`.
+
+Optional flags:
+
+```bash
+npm run test:auto-subtitles -- ./path/to/logo.svg --host http://127.0.0.1:3004 --out /tmp/auto-e2e.mp4 --out-srt /tmp/auto-e2e.srt --format short --text "Custom spoken sentence for subtitle validation"
+```
+
+`--format` accepts `wide` (1920x1080) or `short` (1080x1920).
+
+## YouTube Auto-Post Integration
+
+The app can connect to your YouTube account and auto-post each completed render.
+
+1. Create OAuth credentials in Google Cloud Console for YouTube Data API v3.
+2. Add the callback URL to the OAuth client:
+
+```text
+http://127.0.0.1:3004/api/youtube/callback
+```
+
+3. Set these in `.env.local`:
+
+```bash
+YOUTUBE_CLIENT_ID=your_google_oauth_client_id
+YOUTUBE_CLIENT_SECRET=your_google_oauth_client_secret
+YOUTUBE_REDIRECT_URI=http://127.0.0.1:3004/api/youtube/callback
+```
+
+4. Restart `npm run dev`.
+5. In Phase 3, connect YouTube, enable auto-post, then render.
+
+Routes used by the integration:
+- `GET /api/youtube/status`
+- `GET /api/youtube/auth-url`
+- `GET /api/youtube/callback`
+- `POST /api/youtube/disconnect`
+
 ## Speech To Text Subtitles
 
 Rendering now includes a speech-to-text pipeline:

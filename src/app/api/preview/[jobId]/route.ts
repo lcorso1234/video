@@ -1,10 +1,10 @@
-import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import {
   getDownloadFilename,
   getDownloadStat,
   getDownloadStream,
 } from "@/lib/video-editor";
+import { nodeStreamToReadableStream } from "@/lib/node-stream";
 
 export const runtime = "nodejs";
 
@@ -17,7 +17,7 @@ export async function GET(
     const fileStat = await getDownloadStat(jobId);
     const stream = getDownloadStream(jobId);
 
-    return new NextResponse(Readable.toWeb(stream) as ReadableStream, {
+    return new NextResponse(nodeStreamToReadableStream(stream), {
       headers: {
         "Content-Type": "video/mp4",
         "Content-Length": fileStat.size.toString(),

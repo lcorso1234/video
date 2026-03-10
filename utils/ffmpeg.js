@@ -53,18 +53,24 @@ function hexToAssBgr(value) {
   return `${bb}${gg}${rr}`;
 }
 
-function getSubtitleStyle({ fontSize = 48, highlightColor = "#19b5fe", fontFamily = "Arial" }) {
+function getSubtitleStyle({
+  fontSize = 48,
+  textColor = "#ffffff",
+  highlightColor = "#19b5fe",
+  fontFamily = "Arial",
+}) {
   const clampedFontSize = Math.max(12, Math.min(120, Number(fontSize) || 48));
+  const assText = `&H00${hexToAssBgr(textColor)}`;
   const assHighlight = `&H00${hexToAssBgr(highlightColor)}`;
   return [
     `Fontname=${fontFamily}`,
     `Fontsize=${clampedFontSize}`,
-    "PrimaryColour=&H00FFFFFF",
+    `PrimaryColour=${assText}`,
     `SecondaryColour=${assHighlight}`,
-    "OutlineColour=&H00000000",
-    "BackColour=&H64000000",
-    "BorderStyle=1",
-    "Outline=2",
+    `OutlineColour=${assHighlight}`,
+    `BackColour=${assHighlight}`,
+    "BorderStyle=3",
+    "Outline=0",
     "Shadow=0",
     "Bold=1",
     "Alignment=2",

@@ -1,10 +1,10 @@
-import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import {
   getSubtitleFilename,
   getSubtitleStat,
   getSubtitleStream,
 } from "@/lib/video-editor";
+import { nodeStreamToReadableStream } from "@/lib/node-stream";
 
 export const runtime = "nodejs";
 
@@ -17,7 +17,7 @@ export async function GET(
     const fileStat = await getSubtitleStat(jobId);
     const stream = getSubtitleStream(jobId);
 
-    return new NextResponse(Readable.toWeb(stream) as ReadableStream, {
+    return new NextResponse(nodeStreamToReadableStream(stream), {
       headers: {
         "Content-Type": "application/x-subrip; charset=utf-8",
         "Content-Length": fileStat.size.toString(),

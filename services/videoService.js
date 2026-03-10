@@ -94,7 +94,7 @@ function groupWordsIntoSubtitleLines(words) {
   return groups;
 }
 
-function buildAssKaraokeText(lineWords, activeIndex, highlightBgr) {
+function buildAssKaraokeText(lineWords, activeIndex) {
   return lineWords
     .map((word, index) => {
       const token = escapeAssText(word.word);
@@ -102,7 +102,7 @@ function buildAssKaraokeText(lineWords, activeIndex, highlightBgr) {
         return token;
       }
 
-      return `{\\1c&H00${highlightBgr}&\\bord4\\3c&H000000&}${token}{\\rDefault}`;
+      return `{\\rHighlight}\\h${token}\\h{\\rDefault}`;
     })
     .join(" ");
 }
@@ -111,6 +111,7 @@ function buildAssFromWords({
   words,
   fontFamily,
   fontSize,
+  textColor = "#ffffff",
   highlightColor,
   subtitleStartDelaySeconds = 0,
   subtitleHideRanges = [],
@@ -149,7 +150,9 @@ function buildAssFromWords({
   }
 
   const safeFontSize = Math.max(12, Math.min(120, Number(fontSize) || 48));
+  const textBgr = hexToAssBgr(textColor);
   const highlightBgr = hexToAssBgr(highlightColor);
+  const highlightTextBgr = hexToAssBgr(getReadableTextColorHex(highlightColor));
 
   const header = [
     "[Script Info]",
@@ -161,7 +164,8 @@ function buildAssFromWords({
     "",
     "[V4+ Styles]",
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-    `Style: Default,${fontFamily},${safeFontSize},&H00FFFFFF,&H00${highlightBgr},&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,2.2,0,2,32,32,34,1`,
+    `Style: Default,${fontFamily},${safeFontSize},&H00${textBgr},&H00${highlightBgr},&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2.2,0,2,32,32,34,1`,
+    `Style: Highlight,${fontFamily},${safeFontSize},&H00${highlightTextBgr},&H00${highlightBgr},&H00${highlightBgr},&H00${highlightBgr},-1,0,0,0,100,100,0,0,3,1.6,0,2,32,32,34,1`,
     "",
     "[Events]",
     "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -178,7 +182,7 @@ function buildAssFromWords({
         Math.min(group.end, next ? next.start : current.end),
       );
 
-      const text = buildAssKaraokeText(group.words, i, highlightBgr);
+      const text = buildAssKaraokeText(group.words, i);
       events.push(
         `Dialogue: 0,${formatAssTime(start)},${formatAssTime(end)},Default,,0,0,0,,${text}`,
       );
@@ -212,6 +216,7 @@ async function burnSubtitles({
   wordsPath,
   outputVideoPath,
   fontSize = 48,
+  textColor = "#ffffff",
   highlightColor = "#19b5fe",
   fontFamily = "Arial",
   speedMode = "turbo",
@@ -229,6 +234,7 @@ async function burnSubtitles({
         words,
         fontFamily,
         fontSize,
+        textColor,
         highlightColor,
         subtitleStartDelaySeconds,
         subtitleHideRanges,
@@ -248,7 +254,7 @@ async function burnSubtitles({
   }
 
   if (!subtitleFilter) {
-    const style = getSubtitleStyle({ fontSize, highlightColor, fontFamily });
+    const style = getSubtitleStyle({ fontSize, textColor, highlightColor, fontFamily });
     const escapedSrtPath = escapeSubtitlesPath(srtPath);
     subtitleFilter = `subtitles=${escapedSrtPath}:force_style='${style}'`;
   }
@@ -307,6 +313,20 @@ async function burnSubtitles({
 
   const modeArgs = speedMode === "quality" ? x264ArgsByMode.quality : x264ArgsByMode.balanced;
   await runCommand(ffmpegPath, [...sharedArgs.slice(0, 6), ...modeArgs, ...sharedArgs.slice(6)]);
+}
+
+function getReadableTextColorHex(backgroundHex) {
+  const clean = String(backgroundHex || "")
+    .trim()
+    .replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) {
+    return "000000";
+  }
+  const red = parseInt(clean.slice(0, 2), 16);
+  const green = parseInt(clean.slice(2, 4), 16);
+  const blue = parseInt(clean.slice(4, 6), 16);
+  const luma = (red * 299 + green * 587 + blue * 114) / 1000;
+  return luma >= 150 ? "000000" : "FFFFFF";
 }
 
 module.exports = {

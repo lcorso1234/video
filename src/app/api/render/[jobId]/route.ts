@@ -2,6 +2,7 @@ import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { getRenderJobStatus } from "@/lib/video-editor";
+import { readYouTubePublishStatus } from "@/lib/youtube";
 
 export const runtime = "nodejs";
 
@@ -11,6 +12,7 @@ export async function GET(
 ) {
   try {
     const { jobId } = await context.params;
+    const youtubeStatus = await readYouTubePublishStatus(jobId);
     const pipelineStatusPath = path.join(
       process.cwd(),
       ".video-editor-jobs",
@@ -19,7 +21,8 @@ export async function GET(
     );
     try {
       const pipelineContent = await readFile(pipelineStatusPath, "utf8");
-      return NextResponse.json(JSON.parse(pipelineContent), {
+      const pipelinePayload = JSON.parse(pipelineContent) as Record<string, unknown>;
+      return NextResponse.json({ ...pipelinePayload, youtube: youtubeStatus }, {
         headers: {
           "Cache-Control": "no-store",
         },
@@ -34,7 +37,7 @@ export async function GET(
       return NextResponse.json({ error: "Render job not found." }, { status: 404 });
     }
 
-    return NextResponse.json(status, {
+    return NextResponse.json({ ...status, youtube: youtubeStatus }, {
       headers: {
         "Cache-Control": "no-store",
       },

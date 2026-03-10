@@ -28,6 +28,7 @@ type PipelineServices = {
     wordsPath?: string;
     outputVideoPath: string;
     fontSize?: number;
+    textColor?: string;
     highlightColor?: string;
     fontFamily?: string;
     speedMode?: "turbo" | "balanced" | "quality";
@@ -49,6 +50,7 @@ type PipelineJobInput = {
   language: string;
   fontChoice: string;
   fontSize: number;
+  subtitleTextColor: string;
   highlightColor: string;
   generateTrailerIntroOutro: boolean;
   trailerTitle: string;
@@ -286,6 +288,7 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
       wordsPath,
       outputVideoPath: burnTempPath,
       fontSize: input.fontSize,
+      textColor: input.subtitleTextColor,
       highlightColor: input.highlightColor,
       fontFamily,
       speedMode: input.renderSpeedMode,
@@ -356,6 +359,7 @@ export async function POST(request: Request) {
       language: getText(formData.get("subtitleLanguage"), "en"),
       fontChoice: getText(formData.get("subtitleFontChoice"), "Poppins"),
       fontSize: getNumber(formData.get("subtitleFontSize"), 48),
+      subtitleTextColor: getText(formData.get("subtitleTextColor"), "#ffffff"),
       highlightColor: getText(formData.get("subtitleHighlightColor"), "#19b5fe"),
       generateTrailerIntroOutro: getBoolean(formData.get("generateTrailerIntroOutro"), true),
       trailerTitle: getText(formData.get("trailerTitle"), "COMING UP NEXT"),
