@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import { mkdir, rm, stat } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { NextResponse } from "next/server";
-import { renderVideo, resolveRenderInputFromDraft } from "@/lib/video-editor";
+import {
+  renderVideo,
+  resolveRenderInputFromDraft,
+  type RenderMediaSource,
+} from "@/lib/video-editor";
 import {
   getYouTubeConnectionStatus,
   isYouTubeConfigured,
@@ -21,8 +32,11 @@ const LOGO_ALLOWED_MIME_TYPES = new Set([
 ]);
 const LOGO_ALLOWED_EXTENSIONS = [".svg", ".png", ".jpg", ".jpeg", ".webp"];
 
+const MAX_REMOTE_VIDEO_SIZE_BYTES = 2 * 1024 * 1024 * 1024;
+const REMOTE_UPLOAD_WORKDIR = path.join(os.tmpdir(), "video-render-uploads");
+
 type PipelineJobInput = {
-  sourceVideo: File;
+  sourceVideo: RenderMediaSource;
   subtitleFile: File | null;
   logoFile: File | null;
   introMusicFile: File | null;
@@ -61,6 +75,12 @@ type PipelineJobInput = {
   youtubeDescription: string;
   youtubePrivacyStatus: YouTubePrivacyStatus;
   youtubeTags: string[];
+  cleanupDirectories: string[];
+};
+
+type DownloadedRemoteAsset = {
+  source: RenderMediaSource;
+  cleanupDirectory: string;
 };
 
 function getText(value: FormDataEntryValue | null, fallback = "") {
@@ -141,6 +161,114 @@ async function normalizeLogoFile(file: File | null) {
 
   const baseName = (file.name || "logo").replace(/\.[^/.]+$/, "") || "logo";
   return new File([svgMarkup], `${baseName}.svg`, { type: "image/svg+xml" });
+}
+
+function getMimeExtension(mimeType: string) {
+  if (mimeType === "video/mp4") {
+    return ".mp4";
+  }
+  if (mimeType === "video/webm") {
+    return ".webm";
+  }
+  if (mimeType === "video/quicktime") {
+    return ".mov";
+  }
+  if (mimeType === "video/x-matroska") {
+    return ".mkv";
+  }
+  return "";
+}
+
+function getSafeFilename(filename: string, fallback: string) {
+  const trimmed = filename.trim();
+  const sanitized = trimmed
+    .replace(/[/\\?%*:|"<>]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^\.+/, "")
+    .replace(/\.+$/, "")
+    .slice(0, 120);
+  return sanitized || fallback;
+}
+
+function isRemoteHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupDirectories(paths: string[]) {
+  await Promise.allSettled(
+    paths.map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+}
+
+async function downloadVideoFromUrl(input: {
+  url: string;
+  filenameHint: string;
+  contentTypeHint: string;
+  lastModified: number;
+}): Promise<DownloadedRemoteAsset> {
+  if (!isRemoteHttpUrl(input.url)) {
+    throw new Error("Invalid videoUrl. Expected an http/https URL.");
+  }
+
+  const response = await fetch(input.url, { cache: "no-store" });
+  if (!response.ok || !response.body) {
+    throw new Error(`Unable to download uploaded video URL (HTTP ${response.status}).`);
+  }
+
+  const contentLength = Number(response.headers.get("content-length") || "0");
+  if (Number.isFinite(contentLength) && contentLength > MAX_REMOTE_VIDEO_SIZE_BYTES) {
+    throw new Error("Video is too large to render. Keep upload size under 2 GB.");
+  }
+
+  const responseType = response.headers.get("content-type") || "";
+  const inferredType = (responseType.split(";")[0] || input.contentTypeHint || "").trim();
+  const fallbackNameFromUrl = (() => {
+    try {
+      const pathname = new URL(input.url).pathname;
+      return path.basename(pathname) || "source-video";
+    } catch {
+      return "source-video";
+    }
+  })();
+
+  const baseFilename = getSafeFilename(input.filenameHint || fallbackNameFromUrl, "source-video");
+  const existingExt = path.extname(baseFilename);
+  const extension = existingExt || getMimeExtension(inferredType) || ".mp4";
+  const finalFilename = existingExt ? baseFilename : `${baseFilename}${extension}`;
+
+  const tempDirectory = path.join(REMOTE_UPLOAD_WORKDIR, randomUUID());
+  const destinationPath = path.join(tempDirectory, finalFilename);
+
+  await mkdir(tempDirectory, { recursive: true });
+  await pipeline(
+    Readable.fromWeb(response.body as unknown as NodeReadableStream),
+    createWriteStream(destinationPath),
+  );
+
+  const fileStat = await stat(destinationPath);
+  if (fileStat.size <= 0) {
+    throw new Error("Uploaded video URL resolved to an empty file.");
+  }
+
+  return {
+    source: {
+      path: destinationPath,
+      name: finalFilename,
+      size: fileStat.size,
+      lastModified:
+        Number.isFinite(input.lastModified) && input.lastModified > 0
+          ? Math.round(input.lastModified)
+          : Date.now(),
+      type: inferredType || "video/mp4",
+    },
+    cleanupDirectory: tempDirectory,
+  };
 }
 
 function getSoundtrackChoice(
@@ -264,62 +392,65 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
     }
   } catch {
     void 0;
+  } finally {
+    await cleanupDirectories(input.cleanupDirectories);
   }
 }
 
 export async function POST(request: Request) {
+  const temporaryDirectories: string[] = [];
+  let handoffCleanupToBackgroundJob = false;
+
+  const errorResponse = async (message: string, status = 400) => {
+    if (!handoffCleanupToBackgroundJob) {
+      await cleanupDirectories(temporaryDirectories);
+    }
+    return NextResponse.json({ error: message }, { status });
+  };
+
   try {
     const formData = await request.formData();
     const renderSpeedMode = getRenderSpeedMode(formData.get("renderSpeedMode"));
     const draftId = getText(formData.get("draftId")).trim();
     const draftInput = draftId ? await resolveRenderInputFromDraft(draftId) : null;
+
     const video = formData.get("video");
     const requestVideo = video instanceof File && video.size > 0 ? video : null;
-    const sourceVideo = requestVideo || draftInput?.sourceVideo || null;
+    let sourceVideo: RenderMediaSource | null = requestVideo || draftInput?.sourceVideo || null;
+
     if (!sourceVideo) {
-      return NextResponse.json({ error: "Video upload is required." }, { status: 400 });
+      const videoUrl = getText(formData.get("videoUrl")).trim();
+      if (videoUrl) {
+        const downloadedVideo = await downloadVideoFromUrl({
+          url: videoUrl,
+          filenameHint: getText(formData.get("videoFilename"), "source-video.mp4"),
+          contentTypeHint: getText(formData.get("videoContentType"), "video/mp4"),
+          lastModified: getNumber(formData.get("videoLastModified"), Date.now()),
+        });
+        sourceVideo = downloadedVideo.source;
+        temporaryDirectories.push(downloadedVideo.cleanupDirectory);
+      }
+    }
+
+    if (!sourceVideo) {
+      return errorResponse("Video upload is required.");
     }
 
     const rawSubtitle = getOptionalFile(formData.get("subtitleFile")) || draftInput?.subtitleFile || null;
     if (!rawSubtitle && !process.env.VOSK_MODEL_PATH?.trim()) {
-      return NextResponse.json(
-        {
-          error:
-            "Speech-to-text subtitles require VOSK_MODEL_PATH in the environment. Set it to a local Vosk model folder and restart the server.",
-        },
-        { status: 400 },
+      return errorResponse(
+        "Speech-to-text subtitles require VOSK_MODEL_PATH in the environment. Set it to a local Vosk model folder and restart the server.",
       );
     }
 
-    const clonedVideo = new File([await sourceVideo.arrayBuffer()], sourceVideo.name || "source.mp4", {
-      type: sourceVideo.type || "video/mp4",
-    });
-    const rawLogo = await normalizeLogoFile(
+    const normalizedLogo = await normalizeLogoFile(
       getOptionalFile(formData.get("logo")) || draftInput?.logoFile || null,
     );
-    const rawIntroMusic = getOptionalFile(formData.get("introMusic"));
-    const rawOutroMusic = getOptionalFile(formData.get("outroMusic"));
-    const clonedSubtitle = rawSubtitle
-      ? new File([await rawSubtitle.arrayBuffer()], rawSubtitle.name || "subtitles.srt", {
-          type: rawSubtitle.type || "application/x-subrip",
-        })
-      : null;
-    const clonedLogo = rawLogo
-      ? new File([await rawLogo.arrayBuffer()], rawLogo.name || "logo.svg", {
-          type: rawLogo.type || "image/svg+xml",
-        })
-      : null;
-    const clonedIntroMusic = rawIntroMusic
-      ? new File([await rawIntroMusic.arrayBuffer()], rawIntroMusic.name || "intro-music.mp3", {
-          type: rawIntroMusic.type || "audio/mpeg",
-        })
-      : null;
-    const clonedOutroMusic = rawOutroMusic
-      ? new File([await rawOutroMusic.arrayBuffer()], rawOutroMusic.name || "outro-music.mp3", {
-          type: rawOutroMusic.type || "audio/mpeg",
-        })
-      : null;
+
+    const introMusicFile = getOptionalFile(formData.get("introMusic"));
+    const outroMusicFile = getOptionalFile(formData.get("outroMusic"));
     const youtubeAutoPublish = getBoolean(formData.get("youtubeAutoPublish"), false);
+
     const fallbackYouTubeTitle = (sourceVideo.name || "Produced Video")
       .replace(/\.[^/.]+$/, "")
       .trim();
@@ -335,24 +466,16 @@ export async function POST(request: Request) {
 
     if (youtubeAutoPublish) {
       if (!isYouTubeConfigured()) {
-        return NextResponse.json(
-          {
-            error:
-              "YouTube sync is not configured on the server. Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET first.",
-          },
-          { status: 400 },
+        return errorResponse(
+          "YouTube sync is not configured on the server. Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET first.",
         );
       }
 
       const youtubeStatus = await getYouTubeConnectionStatus();
       if (!youtubeStatus.connected) {
-        return NextResponse.json(
-          {
-            error:
-              youtubeStatus.message ||
-              "YouTube account is not connected. Connect your account in phase 3 first.",
-          },
-          { status: 400 },
+        return errorResponse(
+          youtubeStatus.message ||
+            "YouTube account is not connected. Connect your account in phase 3 first.",
         );
       }
     }
@@ -368,11 +491,11 @@ export async function POST(request: Request) {
     }
 
     const input: PipelineJobInput = {
-      sourceVideo: clonedVideo,
-      subtitleFile: clonedSubtitle,
-      logoFile: clonedLogo,
-      introMusicFile: clonedIntroMusic,
-      outroMusicFile: clonedOutroMusic,
+      sourceVideo,
+      subtitleFile: rawSubtitle,
+      logoFile: normalizedLogo,
+      introMusicFile,
+      outroMusicFile,
       videoFormat: getVideoFormat(formData.get("videoFormat")),
       renderSpeedMode,
       lightningMode: renderSpeedMode === "turbo",
@@ -411,8 +534,10 @@ export async function POST(request: Request) {
       youtubeDescription,
       youtubePrivacyStatus,
       youtubeTags,
+      cleanupDirectories: temporaryDirectories,
     };
 
+    handoffCleanupToBackgroundJob = true;
     void runPipelineJob(jobId, input);
 
     return NextResponse.json(
@@ -429,6 +554,9 @@ export async function POST(request: Request) {
       { status: 202 },
     );
   } catch (error) {
+    if (!handoffCleanupToBackgroundJob) {
+      await cleanupDirectories(temporaryDirectories);
+    }
     const message = error instanceof Error ? error.message : "Unable to queue render job.";
     return NextResponse.json({ error: message }, { status: 500 });
   }

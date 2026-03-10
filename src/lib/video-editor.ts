@@ -1,13 +1,24 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { access, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import ffmpegPath from "ffmpeg-static";
 
+export type RenderMediaSource = File | {
+  path: string;
+  name: string;
+  size: number;
+  lastModified: number;
+  type?: string;
+};
+
 export type RenderVideoInput = {
-  sourceVideo: File;
+  sourceVideo: RenderMediaSource;
   introVideo?: File | null;
   outroVideo?: File | null;
   introMusicFile?: File | null;
@@ -1224,8 +1235,12 @@ async function resolveFontPath(fontChoice?: string) {
 }
 
 async function saveFormFile(file: File, outputPath: string) {
-  const bytes = Buffer.from(await file.arrayBuffer());
-  await writeFile(outputPath, bytes);
+  const sourceStream = Readable.fromWeb(file.stream() as unknown as NodeReadableStream);
+  await pipeline(sourceStream, createWriteStream(outputPath));
+}
+
+function isStoredRenderMediaSource(input: RenderMediaSource): input is Exclude<RenderMediaSource, File> {
+  return !(input instanceof File);
 }
 
 function isSvgPath(filePath: string) {
@@ -1853,7 +1868,11 @@ export async function generateSubtitlesFromSourceVideo(input: {
   await ensureDirectory(tempDirectory);
 
   try {
-    await saveFormFile(input.sourceVideo, sourceUploadPath);
+    if (isStoredRenderMediaSource(input.sourceVideo)) {
+      await copyFile(input.sourceVideo.path, sourceUploadPath);
+    } else {
+      await saveFormFile(input.sourceVideo, sourceUploadPath);
+    }
     await runCommand(getFfmpegBinaryPath(), [
       "-y",
       "-i",
@@ -1929,7 +1948,11 @@ export async function renderVideo(
       `source${getExtension(input.sourceVideo.name)}`,
     );
 
-    await saveFormFile(input.sourceVideo, sourceUploadPath);
+    if (isStoredRenderMediaSource(input.sourceVideo)) {
+      await copyFile(input.sourceVideo.path, sourceUploadPath);
+    } else {
+      await saveFormFile(input.sourceVideo, sourceUploadPath);
+    }
 
     const introUploadPath = input.introVideo?.size
       ? path.join(uploadsDirectory, `intro${getExtension(input.introVideo.name)}`)

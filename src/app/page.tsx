@@ -3,6 +3,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { upload } from "@vercel/blob/client";
 
 type RenderJobPhase = "queued" | "running" | "completed" | "failed";
 type YouTubePublishPhase = "queued" | "uploading" | "completed" | "failed";
@@ -48,7 +49,13 @@ type RenderResponse = {
 
 type AppPhase = 1 | 2 | 3;
 
+type RenderStartPayload = (RenderResponse &
+  RenderStatusResponse & {
+    error?: string;
+  }) | { error?: string; message?: string };
+
 const INTRO_OUTRO_BACKGROUND = "#6f7b86";
+const DIRECT_UPLOAD_REQUIRED_THRESHOLD_BYTES = 4 * 1024 * 1024;
 const ACCEPTED_LOGO_TYPES = new Set([
   "image/svg+xml",
   "image/png",
@@ -220,6 +227,97 @@ function formatBytes(value: number) {
   }
 
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function buildRenderFormData(input: {
+  videoFile?: File;
+  videoUrl?: string;
+  videoFilename?: string;
+  videoContentType?: string;
+  videoSize?: number;
+  videoLastModified?: number;
+  logoFile: File;
+  videoFormat: "short" | "wide";
+  credits: string;
+  subtitleHighlightColor: string;
+  youtubeAutoPublish: boolean;
+  youtubeTitle: string;
+  youtubeDescription: string;
+  youtubePrivacyStatus: YouTubePrivacyStatus;
+  youtubeTags: string;
+}) {
+  const formData = new FormData();
+  if (input.videoFile) {
+    formData.append("video", input.videoFile);
+  } else if (input.videoUrl) {
+    formData.append("videoUrl", input.videoUrl);
+    formData.append("videoFilename", input.videoFilename || "source-video.mp4");
+    formData.append("videoContentType", input.videoContentType || "video/mp4");
+    formData.append("videoSize", String(Math.max(0, Math.round(input.videoSize || 0))));
+    formData.append(
+      "videoLastModified",
+      String(Math.max(0, Math.round(input.videoLastModified || Date.now()))),
+    );
+  }
+  formData.append("logo", input.logoFile);
+  formData.append("generateTrailerIntroOutro", "true");
+  formData.append("videoFormat", input.videoFormat);
+  formData.append("fontChoice", "Poppins");
+  formData.append("soundtrackChoice", "theater-chime");
+  formData.append("backgroundColor", INTRO_OUTRO_BACKGROUND);
+  formData.append("textColor", "#ffffff");
+  formData.append("accentColor", "#ffffff");
+  formData.append("trailerTitle", "");
+  formData.append("trailerSubtitle", "");
+  formData.append("trailerOutroTitle", "");
+  formData.append("trailerOutroSubtitle", "");
+  formData.append("outroCredits", input.credits);
+  formData.append("trailerDuration", "3.5");
+  formData.append("lowerThirdTitle", "");
+  formData.append("lowerThirdSubtitle", "");
+  formData.append("lowerThirdStart", "0");
+  formData.append("lowerThirdDuration", "0");
+  formData.append("subtitleFontChoice", "Poppins");
+  formData.append("subtitleFontSize", "48");
+  formData.append("subtitleTextColor", "#ffffff");
+  formData.append("subtitleHighlightColor", input.subtitleHighlightColor);
+  formData.append("renderSpeedMode", "turbo");
+  formData.append("subtitleLanguage", "en");
+  formData.append("youtubeAutoPublish", input.youtubeAutoPublish ? "true" : "false");
+  formData.append("youtubeTitle", input.youtubeTitle);
+  formData.append("youtubeDescription", input.youtubeDescription);
+  formData.append("youtubePrivacyStatus", input.youtubePrivacyStatus);
+  formData.append("youtubeTags", input.youtubeTags);
+  return formData;
+}
+
+function buildUploadPathname(file: File) {
+  const ext = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).toLowerCase() : ".mp4";
+  const safeBase = stripFileExtension(file.name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 60) || "source-video";
+  return `video-maker/${Date.now()}-${safeBase}${ext}`;
+}
+
+async function parseRenderStartError(response: Response) {
+  if (response.status === 413) {
+    return "Upload rejected (413): request body too large. If hosted on Vercel, serverless uploads are limited. Use smaller files or direct-to-storage uploads.";
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = (await response.json()) as { error?: string; message?: string };
+      return payload.error || payload.message || `Unable to start render (HTTP ${response.status}).`;
+    } catch {
+      return `Unable to start render (HTTP ${response.status}).`;
+    }
+  }
+
+  return `Unable to start render (HTTP ${response.status}).`;
 }
 
 export default function Home() {
@@ -556,56 +654,70 @@ export default function Home() {
     setStatusMessage("Preparing render job...");
 
     try {
-      const formData = new FormData();
-      formData.append("video", videoFile);
-      formData.append("logo", logoFile);
+      const baseRenderInput = {
+        logoFile,
+        videoFormat,
+        credits,
+        subtitleHighlightColor,
+        youtubeAutoPublish,
+        youtubeTitle:
+          youtubeTitle.trim() || stripFileExtension(videoFile.name).trim() || "Produced Video",
+        youtubeDescription: youtubeDescription.trim(),
+        youtubePrivacyStatus,
+        youtubeTags: youtubeTags.trim(),
+      };
 
-      formData.append("generateTrailerIntroOutro", "true");
-      formData.append("videoFormat", videoFormat);
-      formData.append("fontChoice", "Poppins");
-      formData.append("soundtrackChoice", "theater-chime");
-      formData.append("backgroundColor", INTRO_OUTRO_BACKGROUND);
-      formData.append("textColor", "#ffffff");
-      formData.append("accentColor", "#ffffff");
-      formData.append("trailerTitle", "");
-      formData.append("trailerSubtitle", "");
-      formData.append("trailerOutroTitle", "");
-      formData.append("trailerOutroSubtitle", "");
-      formData.append("outroCredits", credits);
-      formData.append("trailerDuration", "3.5");
-      formData.append("lowerThirdTitle", "");
-      formData.append("lowerThirdSubtitle", "");
-      formData.append("lowerThirdStart", "0");
-      formData.append("lowerThirdDuration", "0");
-      formData.append("subtitleFontChoice", "Poppins");
-      formData.append("subtitleFontSize", "48");
-      formData.append("subtitleTextColor", "#ffffff");
-      formData.append("subtitleHighlightColor", subtitleHighlightColor);
-      formData.append("renderSpeedMode", "turbo");
-      formData.append("subtitleLanguage", "en");
-      formData.append("youtubeAutoPublish", youtubeAutoPublish ? "true" : "false");
-      formData.append(
-        "youtubeTitle",
-        youtubeTitle.trim() || stripFileExtension(videoFile.name).trim() || "Produced Video",
-      );
-      formData.append("youtubeDescription", youtubeDescription.trim());
-      formData.append("youtubePrivacyStatus", youtubePrivacyStatus);
-      formData.append("youtubeTags", youtubeTags.trim());
+      let formData: FormData;
+      try {
+        setStatusMessage("Uploading video to cloud storage...");
+        const uploadedVideo = await upload(buildUploadPathname(videoFile), videoFile, {
+          access: "public",
+          handleUploadUrl: "/api/uploads",
+          multipart: true,
+          contentType: videoFile.type || "video/mp4",
+          onUploadProgress: (progress) => {
+            setStatusMessage(`Uploading video to cloud storage... ${progress.percentage.toFixed(0)}%`);
+          },
+        });
+
+        formData = buildRenderFormData({
+          ...baseRenderInput,
+          videoUrl: uploadedVideo.url,
+          videoFilename: videoFile.name,
+          videoContentType: videoFile.type || "video/mp4",
+          videoSize: videoFile.size,
+          videoLastModified: videoFile.lastModified,
+        });
+      } catch (uploadError) {
+        const message =
+          uploadError instanceof Error ? uploadError.message : "Unable to upload video to storage.";
+        if (videoFile.size > DIRECT_UPLOAD_REQUIRED_THRESHOLD_BYTES) {
+          throw new Error(
+            `Direct upload failed before render start (${message}). Configure Vercel Blob (BLOB_READ_WRITE_TOKEN) to process files over 4 MB.`,
+          );
+        }
+
+        setStatusMessage("Cloud upload unavailable. Falling back to direct request...");
+        formData = buildRenderFormData({
+          ...baseRenderInput,
+          videoFile,
+        });
+      }
+
+      setStatusMessage("Starting render job...");
 
       const response = await fetch("/api/render", {
         method: "POST",
         body: formData,
       });
 
-      const payload = (await response.json()) as
-        | (RenderResponse &
-            RenderStatusResponse & {
-              error?: string;
-            })
-        | { error?: string };
+      if (!response.ok) {
+        throw new Error(await parseRenderStartError(response));
+      }
 
-      if (!response.ok || !("jobId" in payload)) {
-        throw new Error((payload as { error?: string }).error || "Unable to start render.");
+      const payload = (await response.json()) as RenderStartPayload;
+      if (!("jobId" in payload)) {
+        throw new Error(payload.error || payload.message || "Unable to start render.");
       }
 
       setActiveRenderJobId(payload.jobId);
@@ -638,13 +750,6 @@ export default function Home() {
         className="pointer-events-none absolute left-7 top-7 h-10 w-auto object-contain sm:left-16 sm:top-7 sm:h-12"
       />
       <div className="mx-auto w-full max-w-5xl space-y-6">
-        <section className="rounded-3xl border border-[#667684]/35 bg-[#1e272f]/72 p-6">
-          <h1 className="text-2xl font-semibold">3-Phase Video Platform</h1>
-          <p className="mt-2 text-sm text-[#b8c3cb]">
-            1. Intro/Outro maker 2. Upload video 3. Add subtitles and produce.
-          </p>
-        </section>
-
         <form onSubmit={handleRender} className="space-y-6">
           <section className="rounded-3xl border border-[#667684]/35 bg-[#1e272f]/72 p-6">
             <p className="text-xs uppercase tracking-[0.2em] text-[#94a1ac]">Phase 1</p>

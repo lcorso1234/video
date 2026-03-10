@@ -3,6 +3,9 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   reactCompiler: true,
   serverExternalPackages: ["ffmpeg-static"],
+  experimental: {
+    proxyClientMaxBodySize: "2gb",
+  },
   turbopack: {
     root: process.cwd(),
   },
