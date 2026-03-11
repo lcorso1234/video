@@ -3,7 +3,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { upload } from "@vercel/blob/client";
+import { renderVideoInBrowser } from "@/lib/browser-renderer";
 
 type RenderJobPhase = "queued" | "running" | "completed" | "failed";
 type YouTubePublishPhase = "queued" | "uploading" | "completed" | "failed";
@@ -49,13 +49,7 @@ type RenderResponse = {
 
 type AppPhase = 1 | 2 | 3;
 
-type RenderStartPayload = (RenderResponse &
-  RenderStatusResponse & {
-    error?: string;
-  }) | { error?: string; message?: string };
-
 const INTRO_OUTRO_BACKGROUND = "#6f7b86";
-const DIRECT_UPLOAD_REQUIRED_THRESHOLD_BYTES = 4 * 1024 * 1024;
 const ACCEPTED_LOGO_TYPES = new Set([
   "image/svg+xml",
   "image/png",
@@ -229,97 +223,6 @@ function formatBytes(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function buildRenderFormData(input: {
-  videoFile?: File;
-  videoUrl?: string;
-  videoFilename?: string;
-  videoContentType?: string;
-  videoSize?: number;
-  videoLastModified?: number;
-  logoFile: File;
-  videoFormat: "short" | "wide";
-  credits: string;
-  subtitleHighlightColor: string;
-  youtubeAutoPublish: boolean;
-  youtubeTitle: string;
-  youtubeDescription: string;
-  youtubePrivacyStatus: YouTubePrivacyStatus;
-  youtubeTags: string;
-}) {
-  const formData = new FormData();
-  if (input.videoFile) {
-    formData.append("video", input.videoFile);
-  } else if (input.videoUrl) {
-    formData.append("videoUrl", input.videoUrl);
-    formData.append("videoFilename", input.videoFilename || "source-video.mp4");
-    formData.append("videoContentType", input.videoContentType || "video/mp4");
-    formData.append("videoSize", String(Math.max(0, Math.round(input.videoSize || 0))));
-    formData.append(
-      "videoLastModified",
-      String(Math.max(0, Math.round(input.videoLastModified || Date.now()))),
-    );
-  }
-  formData.append("logo", input.logoFile);
-  formData.append("generateTrailerIntroOutro", "true");
-  formData.append("videoFormat", input.videoFormat);
-  formData.append("fontChoice", "Poppins");
-  formData.append("soundtrackChoice", "theater-chime");
-  formData.append("backgroundColor", INTRO_OUTRO_BACKGROUND);
-  formData.append("textColor", "#ffffff");
-  formData.append("accentColor", "#ffffff");
-  formData.append("trailerTitle", "");
-  formData.append("trailerSubtitle", "");
-  formData.append("trailerOutroTitle", "");
-  formData.append("trailerOutroSubtitle", "");
-  formData.append("outroCredits", input.credits);
-  formData.append("trailerDuration", "3.5");
-  formData.append("lowerThirdTitle", "");
-  formData.append("lowerThirdSubtitle", "");
-  formData.append("lowerThirdStart", "0");
-  formData.append("lowerThirdDuration", "0");
-  formData.append("subtitleFontChoice", "Poppins");
-  formData.append("subtitleFontSize", "48");
-  formData.append("subtitleTextColor", "#ffffff");
-  formData.append("subtitleHighlightColor", input.subtitleHighlightColor);
-  formData.append("renderSpeedMode", "turbo");
-  formData.append("subtitleLanguage", "en");
-  formData.append("youtubeAutoPublish", input.youtubeAutoPublish ? "true" : "false");
-  formData.append("youtubeTitle", input.youtubeTitle);
-  formData.append("youtubeDescription", input.youtubeDescription);
-  formData.append("youtubePrivacyStatus", input.youtubePrivacyStatus);
-  formData.append("youtubeTags", input.youtubeTags);
-  return formData;
-}
-
-function buildUploadPathname(file: File) {
-  const ext = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).toLowerCase() : ".mp4";
-  const safeBase = stripFileExtension(file.name)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 60) || "source-video";
-  return `video-maker/${Date.now()}-${safeBase}${ext}`;
-}
-
-async function parseRenderStartError(response: Response) {
-  if (response.status === 413) {
-    return "Upload rejected (413): request body too large. If hosted on Vercel, serverless uploads are limited. Use smaller files or direct-to-storage uploads.";
-  }
-
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    try {
-      const payload = (await response.json()) as { error?: string; message?: string };
-      return payload.error || payload.message || `Unable to start render (HTTP ${response.status}).`;
-    } catch {
-      return `Unable to start render (HTTP ${response.status}).`;
-    }
-  }
-
-  return `Unable to start render (HTTP ${response.status}).`;
-}
-
 export default function Home() {
   const [activePhase, setActivePhase] = useState<AppPhase>(1);
   const [logoFile, setLogoFile] = useState<File | null>(null);
@@ -349,12 +252,17 @@ export default function Home() {
   const [renderStatus, setRenderStatus] = useState<RenderStatusResponse | null>(null);
   const [result, setResult] = useState<RenderResponse | null>(null);
   const statusPollerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const localResultUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
       if (statusPollerRef.current) {
         clearInterval(statusPollerRef.current);
         statusPollerRef.current = null;
+      }
+      if (localResultUrlRef.current) {
+        URL.revokeObjectURL(localResultUrlRef.current);
+        localResultUrlRef.current = null;
       }
     };
   }, []);
@@ -625,16 +533,11 @@ export default function Home() {
     }
 
     if (youtubeAutoPublish) {
-      if (!youtubeConnection?.configured) {
-        setErrorMessage("YouTube sync is not configured on the server.");
-        setActivePhase(3);
-        return;
-      }
-      if (!youtubeConnection.connected) {
-        setErrorMessage("Connect your YouTube account in phase 3 before enabling auto-post.");
-        setActivePhase(3);
-        return;
-      }
+      setErrorMessage(
+        "YouTube auto-post is server-only. Disable it for browser-only local rendering.",
+      );
+      setActivePhase(3);
+      return;
     }
 
     if (statusPollerRef.current) {
@@ -643,6 +546,10 @@ export default function Home() {
     }
 
     setErrorMessage("");
+    if (localResultUrlRef.current) {
+      URL.revokeObjectURL(localResultUrlRef.current);
+      localResultUrlRef.current = null;
+    }
     setResult(null);
     setIsSubmitting(true);
     setRenderStatus({
@@ -654,79 +561,48 @@ export default function Home() {
     setStatusMessage("Preparing render job...");
 
     try {
-      const baseRenderInput = {
+      const localJobId = `local-${Date.now()}`;
+      const output = await renderVideoInBrowser({
+        sourceVideoFile: videoFile,
         logoFile,
         videoFormat,
         credits,
-        subtitleHighlightColor,
-        youtubeAutoPublish,
-        youtubeTitle:
-          youtubeTitle.trim() || stripFileExtension(videoFile.name).trim() || "Produced Video",
-        youtubeDescription: youtubeDescription.trim(),
-        youtubePrivacyStatus,
-        youtubeTags: youtubeTags.trim(),
-      };
-
-      let formData: FormData;
-      try {
-        setStatusMessage("Uploading video to cloud storage...");
-        const uploadedVideo = await upload(buildUploadPathname(videoFile), videoFile, {
-          access: "public",
-          handleUploadUrl: "/api/uploads",
-          contentType: videoFile.type || "video/mp4",
-          onUploadProgress: (progress) => {
-            setStatusMessage(`Uploading video to cloud storage... ${progress.percentage.toFixed(0)}%`);
-          },
-        });
-
-        formData = buildRenderFormData({
-          ...baseRenderInput,
-          videoUrl: uploadedVideo.url,
-          videoFilename: videoFile.name,
-          videoContentType: videoFile.type || "video/mp4",
-          videoSize: videoFile.size,
-          videoLastModified: videoFile.lastModified,
-        });
-      } catch (uploadError) {
-        const message =
-          uploadError instanceof Error ? uploadError.message : "Unable to upload video to storage.";
-        if (videoFile.size > DIRECT_UPLOAD_REQUIRED_THRESHOLD_BYTES) {
-          throw new Error(
-            `Direct upload failed before render start (${message}). Configure Vercel Blob (BLOB_READ_WRITE_TOKEN) to process files over 4 MB.`,
-          );
-        }
-
-        setStatusMessage("Cloud upload unavailable. Falling back to direct request...");
-        formData = buildRenderFormData({
-          ...baseRenderInput,
-          videoFile,
-        });
-      }
-
-      setStatusMessage("Starting render job...");
-
-      const response = await fetch("/api/render", {
-        method: "POST",
-        body: formData,
+        backgroundColor: INTRO_OUTRO_BACKGROUND,
+        onProgress: (progress, message) => {
+          const percent = Math.max(0, Math.min(100, Math.round(progress * 100)));
+          setRenderStatus({
+            jobId: localJobId,
+            status: percent >= 100 ? "completed" : "running",
+            progress: percent,
+            message,
+          });
+          setStatusMessage(message);
+        },
       });
 
-      if (!response.ok) {
-        throw new Error(await parseRenderStartError(response));
+      if (localResultUrlRef.current) {
+        URL.revokeObjectURL(localResultUrlRef.current);
       }
+      const localResultUrl = URL.createObjectURL(output.blob);
+      localResultUrlRef.current = localResultUrl;
 
-      const payload = (await response.json()) as RenderStartPayload;
-      if (!("jobId" in payload)) {
-        throw new Error(payload.error || payload.message || "Unable to start render.");
-      }
-
-      setActiveRenderJobId(payload.jobId);
+      setResult({
+        jobId: localJobId,
+        filename: output.filename,
+        downloadUrl: localResultUrl,
+        previewUrl: localResultUrl,
+        sizeInBytes: output.blob.size,
+      });
       setRenderStatus({
-        jobId: payload.jobId,
-        status: payload.status ?? "running",
-        progress: payload.progress ?? 0,
-        message: payload.message ?? "Render started.",
+        jobId: localJobId,
+        status: "completed",
+        progress: 100,
+        message: "Local browser render complete.",
       });
-      setStatusMessage(payload.message ?? "Render started.");
+      setStatusMessage("Local browser render complete.");
+      setIsSubmitting(false);
+      setActiveRenderJobId(null);
+      setErrorMessage("");
     } catch (error) {
       setIsSubmitting(false);
       setActiveRenderJobId(null);
@@ -788,6 +664,10 @@ export default function Home() {
                     setErrorMessage("");
                     setLogoFile(processedFile);
                     setVideoFile(null);
+                    if (localResultUrlRef.current) {
+                      URL.revokeObjectURL(localResultUrlRef.current);
+                      localResultUrlRef.current = null;
+                    }
                     setResult(null);
                     setRenderStatus(null);
                     setStatusMessage(
@@ -911,6 +791,10 @@ export default function Home() {
                 onChange={(event) => {
                   const nextFile = event.target.files?.[0] ?? null;
                   setVideoFile(nextFile);
+                  if (localResultUrlRef.current) {
+                    URL.revokeObjectURL(localResultUrlRef.current);
+                    localResultUrlRef.current = null;
+                  }
                   setResult(null);
                   setRenderStatus(null);
                   if (nextFile) {
@@ -989,7 +873,9 @@ export default function Home() {
             <h2 className="mt-1 text-xl font-semibold">Add Subtitles & Produce</h2>
 
             <div className="mt-4 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
-              <p className="text-sm text-[#d6dde2]">Subtitles are auto-generated from video audio.</p>
+              <p className="text-sm text-[#d6dde2]">
+                Browser-only mode prioritizes fast local rendering. Auto subtitle generation is disabled.
+              </p>
               <p className="mt-1 text-xs text-[#a8b4be]">
                 Highlight color is locked to your logo palette:
                 <span className="font-semibold text-[#e6edf1]"> {subtitleHighlightColor || "not selected"}</span>.
