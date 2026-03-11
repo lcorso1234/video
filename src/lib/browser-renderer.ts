@@ -4,6 +4,13 @@ export type BrowserRenderInput = {
   videoFormat: "short" | "wide";
   credits: string;
   backgroundColor: string;
+  lowerThirdTitle?: string;
+  lowerThirdSubtitle?: string;
+  lowerThirdStart?: number;
+  lowerThirdDuration?: number;
+  subtitleFile?: File | null;
+  subtitleHighlightColor?: string;
+  subtitleTextColor?: string;
   introDurationSeconds?: number;
   outroDurationSeconds?: number;
   fps?: number;
@@ -112,6 +119,21 @@ function drawCoverVideo(
   context.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
 }
 
+function fitContain(
+  sourceWidth: number,
+  sourceHeight: number,
+  maxWidth: number,
+  maxHeight: number,
+) {
+  const safeSourceWidth = Math.max(1, sourceWidth);
+  const safeSourceHeight = Math.max(1, sourceHeight);
+  const ratio = Math.min(maxWidth / safeSourceWidth, maxHeight / safeSourceHeight);
+  return {
+    width: Math.max(1, Math.round(safeSourceWidth * ratio)),
+    height: Math.max(1, Math.round(safeSourceHeight * ratio)),
+  };
+}
+
 function makeWhiteLogoMask(logo: HTMLImageElement) {
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, logo.naturalWidth || logo.width || 1);
@@ -145,10 +167,17 @@ function drawIntro(
   const { width, height, logo, whiteLogoMask, elapsed, duration, backgroundColor } = args;
   const progress = Math.max(0, Math.min(1, elapsed / Math.max(duration, 0.001)));
   const eased = 1 - Math.pow(1 - progress, 2.2);
-  const logoScale = 0.9 + eased * 0.1;
-  const baseSize = Math.round(Math.min(width, height) * 0.28);
-  const logoWidth = Math.round(baseSize * logoScale);
-  const logoHeight = Math.round(baseSize * logoScale);
+  const logoScale = 0.88 + eased * 0.12;
+  const maxLogoWidth = Math.round(width * 0.34 * logoScale);
+  const maxLogoHeight = Math.round(height * 0.28 * logoScale);
+  const logoSize = fitContain(
+    logo.naturalWidth || logo.width || maxLogoWidth,
+    logo.naturalHeight || logo.height || maxLogoHeight,
+    maxLogoWidth,
+    maxLogoHeight,
+  );
+  const logoWidth = logoSize.width;
+  const logoHeight = logoSize.height;
   const logoX = Math.round((width - logoWidth) / 2);
   const logoY = Math.round((height - logoHeight) / 2 - height * 0.03);
 
@@ -177,9 +206,16 @@ function drawOutro(
   const { width, height, logo, elapsed, duration, credits, backgroundColor } = args;
   const progress = Math.max(0, Math.min(1, elapsed / Math.max(duration, 0.001)));
   const eased = 1 - Math.pow(1 - progress, 2.2);
-  const baseSize = Math.round(Math.min(width, height) * 0.24);
-  const logoWidth = baseSize;
-  const logoHeight = baseSize;
+  const maxLogoWidth = Math.round(width * 0.28);
+  const maxLogoHeight = Math.round(height * 0.22);
+  const logoSize = fitContain(
+    logo.naturalWidth || logo.width || maxLogoWidth,
+    logo.naturalHeight || logo.height || maxLogoHeight,
+    maxLogoWidth,
+    maxLogoHeight,
+  );
+  const logoWidth = logoSize.width;
+  const logoHeight = logoSize.height;
   const logoX = Math.round((width - logoWidth) / 2);
   const logoY = Math.round(height * 0.16);
 
@@ -211,6 +247,209 @@ function drawOutro(
   for (let index = 0; index < creditLines.length; index += 1) {
     context.fillText(creditLines[index], Math.round(width / 2), textStartY + index * lineHeight);
   }
+}
+
+function drawRoundedRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  const r = Math.max(0, Math.min(radius, Math.min(width, height) / 2));
+  context.beginPath();
+  context.moveTo(x + r, y);
+  context.lineTo(x + width - r, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + r);
+  context.lineTo(x + width, y + height - r);
+  context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  context.lineTo(x + r, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - r);
+  context.lineTo(x, y + r);
+  context.quadraticCurveTo(x, y, x + r, y);
+  context.closePath();
+}
+
+function drawLowerThird(
+  context: CanvasRenderingContext2D,
+  args: {
+    width: number;
+    height: number;
+    title: string;
+    subtitle: string;
+    progress: number;
+  },
+) {
+  const title = args.title.trim();
+  const subtitle = args.subtitle.trim();
+  if (!title && !subtitle) {
+    return;
+  }
+
+  const eased = Math.max(0, Math.min(1, args.progress));
+  const translateY = Math.round((1 - eased) * 22);
+  const alpha = 0.2 + eased * 0.8;
+  const boxWidth = Math.round(Math.min(args.width * 0.86, 860));
+  const boxHeight = Math.round(Math.max(88, args.height * 0.15));
+  const x = Math.round((args.width - boxWidth) / 2);
+  const y = Math.round(args.height - boxHeight - args.height * 0.07 + translateY);
+
+  context.save();
+  context.globalAlpha = alpha;
+  drawRoundedRect(context, x, y, boxWidth, boxHeight, 16);
+  context.fillStyle = "rgba(10,15,19,0.72)";
+  context.fill();
+  context.strokeStyle = "rgba(255,255,255,0.22)";
+  context.lineWidth = 2;
+  context.stroke();
+
+  context.fillStyle = "rgba(255,255,255,0.96)";
+  context.textAlign = "left";
+  context.textBaseline = "top";
+
+  const contentX = x + 24;
+  let contentY = y + 18;
+  if (title) {
+    context.font = `700 ${Math.max(20, Math.round(args.width * 0.026))}px Poppins, sans-serif`;
+    context.fillText(title, contentX, contentY);
+    contentY += Math.round(Math.max(28, args.height * 0.045));
+  }
+
+  if (subtitle) {
+    context.fillStyle = "rgba(225,234,240,0.95)";
+    context.font = `500 ${Math.max(16, Math.round(args.width * 0.018))}px Poppins, sans-serif`;
+    context.fillText(subtitle, contentX, contentY);
+  }
+
+  context.restore();
+}
+
+type SubtitleCue = {
+  start: number;
+  end: number;
+  text: string;
+};
+
+function parseSrtTimestamp(value: string) {
+  const match = /^(\d{2}):(\d{2}):(\d{2}),(\d{3})$/.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  const milliseconds = Number(match[4]);
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes) ||
+    !Number.isFinite(seconds) ||
+    !Number.isFinite(milliseconds)
+  ) {
+    return null;
+  }
+  return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
+}
+
+function parseSrt(text: string): SubtitleCue[] {
+  const blocks = text
+    .replace(/\r/g, "")
+    .split("\n\n")
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  const cues: SubtitleCue[] = [];
+  for (const block of blocks) {
+    const lines = block.split("\n").map((line) => line.trimEnd());
+    const timeLine = lines.find((line) => line.includes("-->"));
+    if (!timeLine) {
+      continue;
+    }
+    const [startText, endText] = timeLine.split("-->").map((value) => value.trim());
+    const start = parseSrtTimestamp(startText);
+    const end = parseSrtTimestamp(endText);
+    if (start === null || end === null || end <= start) {
+      continue;
+    }
+    const textLines = lines
+      .slice(lines.indexOf(timeLine) + 1)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!textLines.length) {
+      continue;
+    }
+    cues.push({
+      start,
+      end,
+      text: textLines.join("\n"),
+    });
+  }
+
+  return cues;
+}
+
+function getCueAtTime(cues: SubtitleCue[], timeInSeconds: number) {
+  return cues.find((cue) => timeInSeconds >= cue.start && timeInSeconds <= cue.end) || null;
+}
+
+function getReadableTextColor(backgroundColor: string) {
+  const cleaned = backgroundColor.replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(cleaned)) {
+    return "#101418";
+  }
+  const red = parseInt(cleaned.slice(0, 2), 16);
+  const green = parseInt(cleaned.slice(2, 4), 16);
+  const blue = parseInt(cleaned.slice(4, 6), 16);
+  const luma = (red * 299 + green * 587 + blue * 114) / 1000;
+  return luma >= 150 ? "#101418" : "#f8fbff";
+}
+
+function drawSubtitles(
+  context: CanvasRenderingContext2D,
+  args: {
+    width: number;
+    height: number;
+    cue: SubtitleCue;
+    highlightColor: string;
+    textColor: string;
+    lowerThirdVisible: boolean;
+  },
+) {
+  const lines = args.cue.text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+  if (!lines.length) {
+    return;
+  }
+
+  const boxWidth = Math.round(Math.min(args.width * 0.9, 980));
+  const lineHeight = Math.round(Math.max(30, args.width * 0.03));
+  const boxHeight = lines.length * lineHeight + 26;
+  const x = Math.round((args.width - boxWidth) / 2);
+  const yBase = args.lowerThirdVisible
+    ? Math.round(args.height * 0.56)
+    : Math.round(args.height * 0.74);
+  const y = Math.round(yBase - boxHeight / 2);
+
+  context.save();
+  drawRoundedRect(context, x, y, boxWidth, boxHeight, 14);
+  context.fillStyle = args.highlightColor;
+  context.globalAlpha = 0.93;
+  context.fill();
+  context.globalAlpha = 1;
+
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillStyle = args.textColor;
+  context.font = `700 ${Math.max(22, Math.round(args.width * 0.027))}px Poppins, sans-serif`;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineY = y + 14 + lineHeight * index + lineHeight / 2;
+    context.fillText(lines[index], Math.round(args.width / 2), Math.round(lineY));
+  }
+  context.restore();
 }
 
 function waitForRecorderStop(recorder: MediaRecorder) {
@@ -255,6 +494,7 @@ export async function renderVideoInBrowser(input: BrowserRenderInput): Promise<B
   sourceVideo.src = videoUrl;
   sourceVideo.preload = "auto";
   sourceVideo.muted = false;
+  sourceVideo.volume = 0;
   sourceVideo.playsInline = true;
   await waitForVideoMetadata(sourceVideo);
 
@@ -265,6 +505,15 @@ export async function renderVideoInBrowser(input: BrowserRenderInput): Promise<B
   }
 
   const totalDuration = introDuration + sourceDuration + outroDuration;
+  const lowerThirdTitle = (input.lowerThirdTitle || "").trim();
+  const lowerThirdSubtitle = (input.lowerThirdSubtitle || "").trim();
+  const lowerThirdStart = Math.max(0, input.lowerThirdStart ?? 4);
+  const lowerThirdDuration = Math.max(0, input.lowerThirdDuration ?? 6);
+  const subtitleHighlightColor = (input.subtitleHighlightColor || "#E6FF00").trim() || "#E6FF00";
+  const subtitleTextColor =
+    (input.subtitleTextColor || getReadableTextColor(subtitleHighlightColor)).trim() ||
+    getReadableTextColor(subtitleHighlightColor);
+  const subtitles = input.subtitleFile ? parseSrt(await input.subtitleFile.text()) : [];
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -273,24 +522,70 @@ export async function renderVideoInBrowser(input: BrowserRenderInput): Promise<B
     URL.revokeObjectURL(videoUrl);
     throw new Error("Unable to initialize canvas renderer.");
   }
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
 
   const videoStream = canvas.captureStream(fps);
   const mixedStream = new MediaStream(videoStream.getVideoTracks());
   let audioContext: AudioContext | null = null;
+  let sourceAudioStream: MediaStream | null = null;
   let animationFrameId = 0;
   let recorderStarted = false;
+  let bufferSource: AudioBufferSourceNode | null = null;
+  let sourceAudioTrackAttached = false;
+
+  const attachSourceAudioTrack = () => {
+    if (sourceAudioTrackAttached || !sourceAudioStream) {
+      return false;
+    }
+    const audioTrack = sourceAudioStream.getAudioTracks()[0];
+    if (!audioTrack) {
+      return false;
+    }
+    mixedStream.addTrack(audioTrack);
+    sourceAudioTrackAttached = true;
+    return true;
+  };
 
   try {
-    audioContext = new AudioContext();
-    const mediaSource = audioContext.createMediaElementSource(sourceVideo);
-    const destination = audioContext.createMediaStreamDestination();
-    mediaSource.connect(destination);
-    const audioTrack = destination.stream.getAudioTracks()[0];
-    if (audioTrack) {
-      mixedStream.addTrack(audioTrack);
+    const withCapture = sourceVideo as HTMLVideoElement & {
+      captureStream?: () => MediaStream;
+      mozCaptureStream?: () => MediaStream;
+    };
+    if (typeof withCapture.captureStream === "function") {
+      sourceAudioStream = withCapture.captureStream();
+    } else if (typeof withCapture.mozCaptureStream === "function") {
+      sourceAudioStream = withCapture.mozCaptureStream();
     }
+    attachSourceAudioTrack();
   } catch {
-    void 0;
+    sourceAudioStream = null;
+  }
+
+  if (!sourceAudioTrackAttached) {
+    try {
+      audioContext = new AudioContext();
+      const destination = audioContext.createMediaStreamDestination();
+      await audioContext.resume();
+
+      const audioBytes = await input.sourceVideoFile.arrayBuffer();
+      const decodedAudio = await audioContext.decodeAudioData(audioBytes.slice(0));
+      bufferSource = audioContext.createBufferSource();
+      bufferSource.buffer = decodedAudio;
+      bufferSource.connect(destination);
+      bufferSource.start(
+        audioContext.currentTime + introDuration,
+        0,
+        Math.min(decodedAudio.duration, sourceDuration),
+      );
+
+      const audioTrack = destination.stream.getAudioTracks()[0];
+      if (audioTrack) {
+        mixedStream.addTrack(audioTrack);
+      }
+    } catch {
+      void 0;
+    }
   }
 
   const mimeType = getOutputMimeType();
@@ -331,13 +626,54 @@ export async function renderVideoInBrowser(input: BrowserRenderInput): Promise<B
           backgroundColor: input.backgroundColor,
         });
       } else if (clamped < introDuration + sourceDuration) {
+        const sourceElapsed = clamped - introDuration;
         if (!videoStarted) {
           videoStarted = true;
           void sourceVideo.play().catch(() => {
             void 0;
           });
         }
+        attachSourceAudioTrack();
+        if (sourceVideo.currentTime + 0.25 < sourceElapsed) {
+          sourceVideo.currentTime = sourceElapsed;
+        }
         drawCoverVideo(context, sourceVideo, width, height);
+        let lowerThirdVisible = false;
+        if (lowerThirdDuration > 0 && (lowerThirdTitle || lowerThirdSubtitle)) {
+          const lowerThirdEnd = lowerThirdStart + lowerThirdDuration;
+          if (sourceElapsed >= lowerThirdStart && sourceElapsed <= lowerThirdEnd) {
+            lowerThirdVisible = true;
+            const fadeWindow = Math.min(0.35, lowerThirdDuration / 2);
+            const fadeInProgress = Math.max(
+              0,
+              Math.min(1, (sourceElapsed - lowerThirdStart) / Math.max(fadeWindow, 0.001)),
+            );
+            const fadeOutProgress = Math.max(
+              0,
+              Math.min(1, (lowerThirdEnd - sourceElapsed) / Math.max(fadeWindow, 0.001)),
+            );
+            drawLowerThird(context, {
+              width,
+              height,
+              title: lowerThirdTitle,
+              subtitle: lowerThirdSubtitle,
+              progress: Math.min(fadeInProgress, fadeOutProgress),
+            });
+          }
+        }
+        if (subtitles.length) {
+          const cue = getCueAtTime(subtitles, sourceElapsed);
+          if (cue) {
+            drawSubtitles(context, {
+              width,
+              height,
+              cue,
+              highlightColor: subtitleHighlightColor,
+              textColor: subtitleTextColor,
+              lowerThirdVisible,
+            });
+          }
+        }
       } else {
         sourceVideo.pause();
         drawOutro(context, {
@@ -397,7 +733,13 @@ export async function renderVideoInBrowser(input: BrowserRenderInput): Promise<B
   URL.revokeObjectURL(videoUrl);
   sourceVideo.removeAttribute("src");
   sourceVideo.load();
+  try {
+    bufferSource?.stop();
+  } catch {
+    void 0;
+  }
   await audioContext?.close().catch(() => void 0);
+  sourceAudioStream?.getTracks().forEach((track) => track.stop());
   if (recorderStarted && recorder.state !== "inactive") {
     recorder.stop();
   }

@@ -232,6 +232,11 @@ export default function Home() {
   const [logoPaletteError, setLogoPaletteError] = useState("");
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoFormat, setVideoFormat] = useState<"short" | "wide">("wide");
+  const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
+  const [lowerThirdTitle, setLowerThirdTitle] = useState("");
+  const [lowerThirdSubtitle, setLowerThirdSubtitle] = useState("");
+  const [lowerThirdStart, setLowerThirdStart] = useState("4");
+  const [lowerThirdDuration, setLowerThirdDuration] = useState("6");
   const [credits, setCredits] = useState(
     "Executive Producer - Name\nDirector - Name\nEditor - Name\nPresented by - Organization",
   );
@@ -540,6 +545,17 @@ export default function Home() {
       return;
     }
 
+    const parsedLowerThirdStart = Number(lowerThirdStart);
+    const parsedLowerThirdDuration = Number(lowerThirdDuration);
+    const safeLowerThirdStart =
+      Number.isFinite(parsedLowerThirdStart) && parsedLowerThirdStart >= 0
+        ? parsedLowerThirdStart
+        : 4;
+    const safeLowerThirdDuration =
+      Number.isFinite(parsedLowerThirdDuration) && parsedLowerThirdDuration >= 0
+        ? parsedLowerThirdDuration
+        : 6;
+
     if (statusPollerRef.current) {
       clearInterval(statusPollerRef.current);
       statusPollerRef.current = null;
@@ -568,6 +584,12 @@ export default function Home() {
         videoFormat,
         credits,
         backgroundColor: INTRO_OUTRO_BACKGROUND,
+        lowerThirdTitle,
+        lowerThirdSubtitle,
+        lowerThirdStart: safeLowerThirdStart,
+        lowerThirdDuration: safeLowerThirdDuration,
+        subtitleFile,
+        subtitleHighlightColor,
         onProgress: (progress, message) => {
           const percent = Math.max(0, Math.min(100, Math.round(progress * 100)));
           setRenderStatus({
@@ -791,6 +813,7 @@ export default function Home() {
                 onChange={(event) => {
                   const nextFile = event.target.files?.[0] ?? null;
                   setVideoFile(nextFile);
+                  setSubtitleFile(null);
                   if (localResultUrlRef.current) {
                     URL.revokeObjectURL(localResultUrlRef.current);
                     localResultUrlRef.current = null;
@@ -879,6 +902,82 @@ export default function Home() {
               <p className="mt-1 text-xs text-[#a8b4be]">
                 Highlight color is locked to your logo palette:
                 <span className="font-semibold text-[#e6edf1]"> {subtitleHighlightColor || "not selected"}</span>.
+              </p>
+            </div>
+
+            <label className="mt-4 grid gap-2 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <span className="text-sm text-[#d6dde2]">Subtitles (.srt)</span>
+              <input
+                type="file"
+                accept=".srt,text/plain"
+                disabled={!phase3Unlocked}
+                onChange={(event) => {
+                  const nextFile = event.target.files?.[0] ?? null;
+                  if (nextFile && !nextFile.name.toLowerCase().endsWith(".srt")) {
+                    setSubtitleFile(null);
+                    setErrorMessage("Subtitle file must be .srt.");
+                    return;
+                  }
+                  setErrorMessage("");
+                  setSubtitleFile(nextFile);
+                }}
+                className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#aab6bf] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[#161d22] disabled:opacity-55"
+              />
+              <span className="text-xs text-[#9eabb6]">
+                {subtitleFile
+                  ? `Loaded: ${subtitleFile.name}`
+                  : "Optional. Upload an SRT file to burn subtitles into the video."}
+              </span>
+            </label>
+
+            <div className="mt-4 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
+              <p className="text-sm text-[#d6dde2]">Lower Third (optional)</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
+                  <span>Title</span>
+                  <input
+                    type="text"
+                    value={lowerThirdTitle}
+                    onChange={(event) => setLowerThirdTitle(event.target.value)}
+                    placeholder="Name"
+                    className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
+                  <span>Subtitle</span>
+                  <input
+                    type="text"
+                    value={lowerThirdSubtitle}
+                    onChange={(event) => setLowerThirdSubtitle(event.target.value)}
+                    placeholder="Title or organization"
+                    className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
+                  <span>Start time (seconds)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.1"
+                    value={lowerThirdStart}
+                    onChange={(event) => setLowerThirdStart(event.target.value)}
+                    className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
+                  <span>Duration (seconds)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.1"
+                    value={lowerThirdDuration}
+                    onChange={(event) => setLowerThirdDuration(event.target.value)}
+                    className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
+                  />
+                </label>
+              </div>
+              <p className="mt-2 text-xs text-[#9eabb6]">
+                Leave title and subtitle blank to skip lower-third.
               </p>
             </div>
 
