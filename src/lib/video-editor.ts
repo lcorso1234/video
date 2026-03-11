@@ -1613,10 +1613,8 @@ async function createTrailerBrandClip(params: {
   const introSubtitle = params.subtitle?.trim() || "A cinematic AI-finished trailer";
   const outroTitle = params.title?.trim() || "THANK YOU FOR WATCHING";
   const outroSubtitle = params.subtitle?.trim() || "Stay tuned for the next release";
-  const logoBlackHoldDuration = Math.max(0.18, duration * 0.14);
-  const logoBlackToWhiteEnd = Math.max(logoBlackHoldDuration + 0.28, duration * 0.38);
-  const logoBlackToWhiteDuration = Math.max(0.24, logoBlackToWhiteEnd - logoBlackHoldDuration);
-  const logoWhiteHoldEnd = Math.max(logoBlackToWhiteEnd + 0.22, duration * 0.58);
+  const logoTransparentToWhiteDuration = Math.max(0.32, duration * 0.34);
+  const logoWhiteHoldEnd = Math.max(logoTransparentToWhiteDuration + 0.22, duration * 0.58);
   const logoWhiteToColorDuration = Math.max(0.25, duration - logoWhiteHoldEnd);
   const contentAlphaExpr = "1";
   const baseColor = "0x2A3439";
@@ -1660,10 +1658,10 @@ async function createTrailerBrandClip(params: {
     );
     filters.push(
       `[${logoInputIndex}:v]format=rgba,scale=${logoScale}:-1:force_original_aspect_ratio=decrease[logo-base]`,
-      `[logo-base]split=3[logo-color][logo-black-src][logo-white-src]`,
-      `[logo-black-src]colorchannelmixer=rr=0:gg=0:bb=0[logo-black]`,
+      `[logo-base]split=3[logo-color][logo-transparent-src][logo-white-src]`,
+      `[logo-transparent-src]colorchannelmixer=aa=0[logo-transparent]`,
       `[logo-white-src]eq=contrast=0:brightness=0.5[logo-white]`,
-      `[logo-black][logo-white]blend=all_expr='if(lte(T,${logoBlackHoldDuration}),A,if(lte(T,${logoBlackToWhiteEnd}),A*(1-((T-${logoBlackHoldDuration})/${logoBlackToWhiteDuration}))+B*(((T-${logoBlackHoldDuration})/${logoBlackToWhiteDuration})),B))'[logo-phase-white]`,
+      `[logo-transparent][logo-white]blend=all_expr='if(lte(T,${logoTransparentToWhiteDuration}),A*(1-(T/${logoTransparentToWhiteDuration}))+B*(T/${logoTransparentToWhiteDuration}),B)'[logo-phase-white]`,
       `[logo-phase-white][logo-color]blend=all_expr='if(lte(T,${logoWhiteHoldEnd}),A,if(gte(T,${duration}),B,A*(1-((T-${logoWhiteHoldEnd})/${logoWhiteToColorDuration}))+B*((T-${logoWhiteHoldEnd})/${logoWhiteToColorDuration})))',colorchannelmixer=aa=1[logo]`,
     );
   }

@@ -66,34 +66,6 @@ npm run test:auto-subtitles -- ./path/to/logo.svg --host http://127.0.0.1:3004 -
 
 `--format` accepts `wide` (1920x1080) or `short` (1080x1920).
 
-## YouTube Auto-Post Integration
-
-The app can connect to your YouTube account and auto-post each completed render.
-
-1. Create OAuth credentials in Google Cloud Console for YouTube Data API v3.
-2. Add the callback URL to the OAuth client:
-
-```text
-http://127.0.0.1:3004/api/youtube/callback
-```
-
-3. Set these in `.env.local`:
-
-```bash
-YOUTUBE_CLIENT_ID=your_google_oauth_client_id
-YOUTUBE_CLIENT_SECRET=your_google_oauth_client_secret
-YOUTUBE_REDIRECT_URI=http://127.0.0.1:3004/api/youtube/callback
-```
-
-4. Restart `npm run dev`.
-5. In Phase 3, connect YouTube, enable auto-post, then render.
-
-Routes used by the integration:
-- `GET /api/youtube/status`
-- `GET /api/youtube/auth-url`
-- `GET /api/youtube/callback`
-- `POST /api/youtube/disconnect`
-
 ## Speech To Text Subtitles
 
 Rendering now includes a speech-to-text pipeline:

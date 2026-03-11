@@ -1,24 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { mkdir, rm, stat } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import type { ReadableStream as NodeReadableStream } from "node:stream/web";
+import { rm } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import {
   renderVideo,
   resolveRenderInputFromDraft,
   type RenderMediaSource,
 } from "@/lib/video-editor";
-import {
-  getYouTubeConnectionStatus,
-  isYouTubeConfigured,
-  uploadVideoToYouTube,
-  writeYouTubePublishStatus,
-  type YouTubePrivacyStatus,
-} from "@/lib/youtube";
 
 export const runtime = "nodejs";
 const DEFAULT_SUBTITLE_FONT_SIZE = 48;
@@ -31,9 +18,6 @@ const LOGO_ALLOWED_MIME_TYPES = new Set([
   "image/webp",
 ]);
 const LOGO_ALLOWED_EXTENSIONS = [".svg", ".png", ".jpg", ".jpeg", ".webp"];
-
-const MAX_REMOTE_VIDEO_SIZE_BYTES = 2 * 1024 * 1024 * 1024;
-const REMOTE_UPLOAD_WORKDIR = path.join(os.tmpdir(), "video-render-uploads");
 
 type PipelineJobInput = {
   sourceVideo: RenderMediaSource;
@@ -70,17 +54,7 @@ type PipelineJobInput = {
   lowerThirdSubtitle: string;
   lowerThirdStart: number;
   lowerThirdDuration: number;
-  youtubeAutoPublish: boolean;
-  youtubeTitle: string;
-  youtubeDescription: string;
-  youtubePrivacyStatus: YouTubePrivacyStatus;
-  youtubeTags: string[];
   cleanupDirectories: string[];
-};
-
-type DownloadedRemoteAsset = {
-  source: RenderMediaSource;
-  cleanupDirectory: string;
 };
 
 function getText(value: FormDataEntryValue | null, fallback = "") {
@@ -163,112 +137,10 @@ async function normalizeLogoFile(file: File | null) {
   return new File([svgMarkup], `${baseName}.svg`, { type: "image/svg+xml" });
 }
 
-function getMimeExtension(mimeType: string) {
-  if (mimeType === "video/mp4") {
-    return ".mp4";
-  }
-  if (mimeType === "video/webm") {
-    return ".webm";
-  }
-  if (mimeType === "video/quicktime") {
-    return ".mov";
-  }
-  if (mimeType === "video/x-matroska") {
-    return ".mkv";
-  }
-  return "";
-}
-
-function getSafeFilename(filename: string, fallback: string) {
-  const trimmed = filename.trim();
-  const sanitized = trimmed
-    .replace(/[/\\?%*:|"<>]/g, "-")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^\.+/, "")
-    .replace(/\.+$/, "")
-    .slice(0, 120);
-  return sanitized || fallback;
-}
-
-function isRemoteHttpUrl(value: string) {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
 async function cleanupDirectories(paths: string[]) {
   await Promise.allSettled(
     paths.map((directory) => rm(directory, { recursive: true, force: true })),
   );
-}
-
-async function downloadVideoFromUrl(input: {
-  url: string;
-  filenameHint: string;
-  contentTypeHint: string;
-  lastModified: number;
-}): Promise<DownloadedRemoteAsset> {
-  if (!isRemoteHttpUrl(input.url)) {
-    throw new Error("Invalid videoUrl. Expected an http/https URL.");
-  }
-
-  const response = await fetch(input.url, { cache: "no-store" });
-  if (!response.ok || !response.body) {
-    throw new Error(`Unable to download uploaded video URL (HTTP ${response.status}).`);
-  }
-
-  const contentLength = Number(response.headers.get("content-length") || "0");
-  if (Number.isFinite(contentLength) && contentLength > MAX_REMOTE_VIDEO_SIZE_BYTES) {
-    throw new Error("Video is too large to render. Keep upload size under 2 GB.");
-  }
-
-  const responseType = response.headers.get("content-type") || "";
-  const inferredType = (responseType.split(";")[0] || input.contentTypeHint || "").trim();
-  const fallbackNameFromUrl = (() => {
-    try {
-      const pathname = new URL(input.url).pathname;
-      return path.basename(pathname) || "source-video";
-    } catch {
-      return "source-video";
-    }
-  })();
-
-  const baseFilename = getSafeFilename(input.filenameHint || fallbackNameFromUrl, "source-video");
-  const existingExt = path.extname(baseFilename);
-  const extension = existingExt || getMimeExtension(inferredType) || ".mp4";
-  const finalFilename = existingExt ? baseFilename : `${baseFilename}${extension}`;
-
-  const tempDirectory = path.join(REMOTE_UPLOAD_WORKDIR, randomUUID());
-  const destinationPath = path.join(tempDirectory, finalFilename);
-
-  await mkdir(tempDirectory, { recursive: true });
-  await pipeline(
-    Readable.fromWeb(response.body as unknown as NodeReadableStream),
-    createWriteStream(destinationPath),
-  );
-
-  const fileStat = await stat(destinationPath);
-  if (fileStat.size <= 0) {
-    throw new Error("Uploaded video URL resolved to an empty file.");
-  }
-
-  return {
-    source: {
-      path: destinationPath,
-      name: finalFilename,
-      size: fileStat.size,
-      lastModified:
-        Number.isFinite(input.lastModified) && input.lastModified > 0
-          ? Math.round(input.lastModified)
-          : Date.now(),
-      type: inferredType || "video/mp4",
-    },
-    cleanupDirectory: tempDirectory,
-  };
 }
 
 function getSoundtrackChoice(
@@ -321,29 +193,10 @@ function getTimelineQualityForSpeedMode(
   return "fast";
 }
 
-function getYouTubePrivacyStatus(value: FormDataEntryValue | null): YouTubePrivacyStatus {
-  if (value === "public" || value === "unlisted" || value === "private") {
-    return value;
-  }
-  return "private";
-}
-
-function getYouTubeTags(value: FormDataEntryValue | null) {
-  if (typeof value !== "string") {
-    return [];
-  }
-
-  return value
-    .split(",")
-    .map((tag) => tag.trim())
-    .filter(Boolean)
-    .slice(0, 30);
-}
-
 async function runPipelineJob(jobId: string, input: PipelineJobInput) {
   try {
     const isLightning = input.lightningMode;
-    const renderResult = await renderVideo(
+    await renderVideo(
       {
         sourceVideo: input.sourceVideo,
         subtitleFile: input.subtitleFile,
@@ -379,17 +232,6 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
       },
       { jobId },
     );
-
-    if (input.youtubeAutoPublish) {
-      await uploadVideoToYouTube({
-        jobId,
-        videoPath: renderResult.outputPath,
-        title: input.youtubeTitle,
-        description: input.youtubeDescription,
-        privacyStatus: input.youtubePrivacyStatus,
-        tags: input.youtubeTags,
-      });
-    }
   } catch {
     void 0;
   } finally {
@@ -416,21 +258,7 @@ export async function POST(request: Request) {
 
     const video = formData.get("video");
     const requestVideo = video instanceof File && video.size > 0 ? video : null;
-    let sourceVideo: RenderMediaSource | null = requestVideo || draftInput?.sourceVideo || null;
-
-    if (!sourceVideo) {
-      const videoUrl = getText(formData.get("videoUrl")).trim();
-      if (videoUrl) {
-        const downloadedVideo = await downloadVideoFromUrl({
-          url: videoUrl,
-          filenameHint: getText(formData.get("videoFilename"), "source-video.mp4"),
-          contentTypeHint: getText(formData.get("videoContentType"), "video/mp4"),
-          lastModified: getNumber(formData.get("videoLastModified"), Date.now()),
-        });
-        sourceVideo = downloadedVideo.source;
-        temporaryDirectories.push(downloadedVideo.cleanupDirectory);
-      }
-    }
+    const sourceVideo: RenderMediaSource | null = requestVideo || draftInput?.sourceVideo || null;
 
     if (!sourceVideo) {
       return errorResponse("Video upload is required.");
@@ -449,46 +277,8 @@ export async function POST(request: Request) {
 
     const introMusicFile = getOptionalFile(formData.get("introMusic"));
     const outroMusicFile = getOptionalFile(formData.get("outroMusic"));
-    const youtubeAutoPublish = getBoolean(formData.get("youtubeAutoPublish"), false);
-
-    const fallbackYouTubeTitle = (sourceVideo.name || "Produced Video")
-      .replace(/\.[^/.]+$/, "")
-      .trim();
-    const youtubeTitle =
-      getText(formData.get("youtubeTitle"), fallbackYouTubeTitle || "Produced Video")
-        .trim()
-        .slice(0, 100) || fallbackYouTubeTitle || "Produced Video";
-    const youtubeDescription = getText(formData.get("youtubeDescription"), "")
-      .trim()
-      .slice(0, 5000);
-    const youtubePrivacyStatus = getYouTubePrivacyStatus(formData.get("youtubePrivacyStatus"));
-    const youtubeTags = getYouTubeTags(formData.get("youtubeTags"));
-
-    if (youtubeAutoPublish) {
-      if (!isYouTubeConfigured()) {
-        return errorResponse(
-          "YouTube sync is not configured on the server. Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET first.",
-        );
-      }
-
-      const youtubeStatus = await getYouTubeConnectionStatus();
-      if (!youtubeStatus.connected) {
-        return errorResponse(
-          youtubeStatus.message ||
-            "YouTube account is not connected. Connect your account in phase 3 first.",
-        );
-      }
-    }
 
     const jobId = randomUUID();
-    if (youtubeAutoPublish) {
-      await writeYouTubePublishStatus(jobId, {
-        status: "queued",
-        message: "YouTube upload queued. Upload starts after render completes.",
-        title: youtubeTitle,
-        privacyStatus: youtubePrivacyStatus,
-      });
-    }
 
     const input: PipelineJobInput = {
       sourceVideo,
@@ -529,11 +319,6 @@ export async function POST(request: Request) {
       lowerThirdSubtitle: getText(formData.get("lowerThirdSubtitle")),
       lowerThirdStart: getNumber(formData.get("lowerThirdStart"), 4),
       lowerThirdDuration: getNumber(formData.get("lowerThirdDuration"), 6),
-      youtubeAutoPublish,
-      youtubeTitle,
-      youtubeDescription,
-      youtubePrivacyStatus,
-      youtubeTags,
       cleanupDirectories: temporaryDirectories,
     };
 

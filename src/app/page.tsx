@@ -2,31 +2,9 @@
 
 /* eslint-disable @next/next/no-img-element */
 
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { upload } from "@vercel/blob/client";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 type RenderJobPhase = "queued" | "running" | "completed" | "failed";
-type YouTubePublishPhase = "queued" | "uploading" | "completed" | "failed";
-type YouTubePrivacyStatus = "private" | "unlisted" | "public";
-
-type YouTubeConnectionStatus = {
-  configured: boolean;
-  connected: boolean;
-  channelId?: string;
-  channelTitle?: string;
-  message?: string;
-};
-
-type YouTubePublishStatus = {
-  status: YouTubePublishPhase;
-  message: string;
-  updatedAt: string;
-  title?: string;
-  privacyStatus?: YouTubePrivacyStatus;
-  videoId?: string;
-  videoUrl?: string;
-  error?: string;
-};
 
 type RenderStatusResponse = {
   jobId: string;
@@ -36,7 +14,6 @@ type RenderStatusResponse = {
   filename?: string;
   sizeInBytes?: number;
   error?: string;
-  youtube?: YouTubePublishStatus | null;
 };
 
 type RenderResponse = {
@@ -55,7 +32,6 @@ type RenderStartPayload = (RenderResponse &
   }) | { error?: string; message?: string };
 
 const INTRO_OUTRO_BACKGROUND = "#6f7b86";
-const DIRECT_UPLOAD_REQUIRED_THRESHOLD_BYTES = 4 * 1024 * 1024;
 const ACCEPTED_LOGO_TYPES = new Set([
   "image/svg+xml",
   "image/png",
@@ -231,39 +207,20 @@ function formatBytes(value: number) {
 
 function buildRenderFormData(input: {
   videoFile?: File;
-  videoUrl?: string;
-  videoFilename?: string;
-  videoContentType?: string;
-  videoSize?: number;
-  videoLastModified?: number;
   logoFile: File;
   videoFormat: "short" | "wide";
   credits: string;
   subtitleHighlightColor: string;
-  youtubeAutoPublish: boolean;
-  youtubeTitle: string;
-  youtubeDescription: string;
-  youtubePrivacyStatus: YouTubePrivacyStatus;
-  youtubeTags: string;
 }) {
   const formData = new FormData();
   if (input.videoFile) {
     formData.append("video", input.videoFile);
-  } else if (input.videoUrl) {
-    formData.append("videoUrl", input.videoUrl);
-    formData.append("videoFilename", input.videoFilename || "source-video.mp4");
-    formData.append("videoContentType", input.videoContentType || "video/mp4");
-    formData.append("videoSize", String(Math.max(0, Math.round(input.videoSize || 0))));
-    formData.append(
-      "videoLastModified",
-      String(Math.max(0, Math.round(input.videoLastModified || Date.now()))),
-    );
   }
   formData.append("logo", input.logoFile);
   formData.append("generateTrailerIntroOutro", "true");
   formData.append("videoFormat", input.videoFormat);
   formData.append("fontChoice", "Poppins");
-  formData.append("soundtrackChoice", "theater-chime");
+  formData.append("soundtrackChoice", "startup-chime");
   formData.append("backgroundColor", INTRO_OUTRO_BACKGROUND);
   formData.append("textColor", "#ffffff");
   formData.append("accentColor", "#ffffff");
@@ -283,28 +240,12 @@ function buildRenderFormData(input: {
   formData.append("subtitleHighlightColor", input.subtitleHighlightColor);
   formData.append("renderSpeedMode", "turbo");
   formData.append("subtitleLanguage", "en");
-  formData.append("youtubeAutoPublish", input.youtubeAutoPublish ? "true" : "false");
-  formData.append("youtubeTitle", input.youtubeTitle);
-  formData.append("youtubeDescription", input.youtubeDescription);
-  formData.append("youtubePrivacyStatus", input.youtubePrivacyStatus);
-  formData.append("youtubeTags", input.youtubeTags);
   return formData;
-}
-
-function buildUploadPathname(file: File) {
-  const ext = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).toLowerCase() : ".mp4";
-  const safeBase = stripFileExtension(file.name)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 60) || "source-video";
-  return `video-maker/${Date.now()}-${safeBase}${ext}`;
 }
 
 async function parseRenderStartError(response: Response) {
   if (response.status === 413) {
-    return "Upload rejected (413): request body too large. If hosted on Vercel, serverless uploads are limited. Use smaller files or direct-to-storage uploads.";
+    return "Upload rejected (413): request body too large. Use a smaller file or run this locally without serverless size limits.";
   }
 
   const contentType = response.headers.get("content-type") || "";
@@ -332,13 +273,6 @@ export default function Home() {
   const [credits, setCredits] = useState(
     "Executive Producer - Name\nDirector - Name\nEditor - Name\nPresented by - Organization",
   );
-  const [youtubeConnection, setYouTubeConnection] = useState<YouTubeConnectionStatus | null>(null);
-  const [youtubeBusy, setYouTubeBusy] = useState(false);
-  const [youtubeAutoPublish, setYouTubeAutoPublish] = useState(false);
-  const [youtubeTitle, setYouTubeTitle] = useState("Produced Video");
-  const [youtubeDescription, setYouTubeDescription] = useState("");
-  const [youtubePrivacyStatus, setYouTubePrivacyStatus] = useState<YouTubePrivacyStatus>("private");
-  const [youtubeTags, setYouTubeTags] = useState("");
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState(
@@ -416,64 +350,6 @@ export default function Home() {
   }, [logoFile]);
 
   useEffect(() => {
-    if (!videoFile) {
-      return;
-    }
-
-    setYouTubeTitle((current) => {
-      if (!current.trim() || current === "Produced Video") {
-        const cleaned = stripFileExtension(videoFile.name).trim();
-        return cleaned || "Produced Video";
-      }
-      return current;
-    });
-  }, [videoFile]);
-
-  const refreshYouTubeConnection = useCallback(async () => {
-    try {
-      const response = await fetch("/api/youtube/status", { cache: "no-store" });
-      const payload = (await response.json()) as YouTubeConnectionStatus & { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || payload.message || "Unable to load YouTube status.");
-      }
-      setYouTubeConnection(payload);
-    } catch (error) {
-      setYouTubeConnection({
-        configured: false,
-        connected: false,
-        message: error instanceof Error ? error.message : "Unable to load YouTube status.",
-      });
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshYouTubeConnection();
-  }, [refreshYouTubeConnection]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const youtubeState = params.get("youtube");
-    const youtubeMessage = params.get("message");
-    if (!youtubeState) {
-      return;
-    }
-
-    void refreshYouTubeConnection();
-    if (youtubeState === "connected") {
-      setStatusMessage("YouTube account connected.");
-      setErrorMessage("");
-    } else if (youtubeState === "error") {
-      setErrorMessage(youtubeMessage || "YouTube connection failed.");
-    }
-
-    params.delete("youtube");
-    params.delete("message");
-    const query = params.toString();
-    const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}`;
-    window.history.replaceState({}, "", nextUrl);
-  }, [refreshYouTubeConnection]);
-
-  useEffect(() => {
     if (!activeRenderJobId || !isSubmitting) {
       if (statusPollerRef.current) {
         clearInterval(statusPollerRef.current);
@@ -498,14 +374,7 @@ export default function Home() {
         }
 
         setRenderStatus(payload);
-        const youtubeState = payload.youtube?.status;
-        const youtubeInFlight =
-          payload.status === "completed" && (youtubeState === "uploading" || youtubeState === "queued");
-        if (youtubeInFlight) {
-          setStatusMessage(payload.youtube?.message || payload.message || "Uploading to YouTube...");
-        } else {
-          setStatusMessage(payload.message || "Rendering...");
-        }
+        setStatusMessage(payload.message || "Rendering...");
 
         if (payload.status === "completed") {
           setResult((current) => {
@@ -520,10 +389,6 @@ export default function Home() {
               sizeInBytes: payload.sizeInBytes ?? 0,
             };
           });
-
-          if (youtubeInFlight) {
-            return;
-          }
 
           if (statusPollerRef.current) {
             clearInterval(statusPollerRef.current);
@@ -562,47 +427,6 @@ export default function Home() {
     statusPollerRef.current = setInterval(pollStatus, 1500);
   }, [activeRenderJobId, isSubmitting]);
 
-  async function handleYouTubeConnect() {
-    setYouTubeBusy(true);
-    setErrorMessage("");
-
-    try {
-      const response = await fetch("/api/youtube/auth-url", { cache: "no-store" });
-      const payload = (await response.json()) as { url?: string; error?: string };
-      if (!response.ok || !payload.url) {
-        throw new Error(payload.error || "Unable to start YouTube connection.");
-      }
-
-      window.location.href = payload.url;
-    } catch (error) {
-      setYouTubeBusy(false);
-      setErrorMessage(error instanceof Error ? error.message : "Unable to start YouTube connection.");
-    }
-  }
-
-  async function handleYouTubeDisconnect() {
-    setYouTubeBusy(true);
-    setErrorMessage("");
-
-    try {
-      const response = await fetch("/api/youtube/disconnect", {
-        method: "POST",
-      });
-      const payload = (await response.json()) as { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || "Unable to disconnect YouTube.");
-      }
-
-      setYouTubeAutoPublish(false);
-      await refreshYouTubeConnection();
-      setStatusMessage("YouTube account disconnected.");
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Unable to disconnect YouTube.");
-    } finally {
-      setYouTubeBusy(false);
-    }
-  }
-
   async function handleRender(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -624,19 +448,6 @@ export default function Home() {
       return;
     }
 
-    if (youtubeAutoPublish) {
-      if (!youtubeConnection?.configured) {
-        setErrorMessage("YouTube sync is not configured on the server.");
-        setActivePhase(3);
-        return;
-      }
-      if (!youtubeConnection.connected) {
-        setErrorMessage("Connect your YouTube account in phase 3 before enabling auto-post.");
-        setActivePhase(3);
-        return;
-      }
-    }
-
     if (statusPollerRef.current) {
       clearInterval(statusPollerRef.current);
       statusPollerRef.current = null;
@@ -654,54 +465,13 @@ export default function Home() {
     setStatusMessage("Preparing render job...");
 
     try {
-      const baseRenderInput = {
+      const formData = buildRenderFormData({
+        videoFile,
         logoFile,
         videoFormat,
         credits,
         subtitleHighlightColor,
-        youtubeAutoPublish,
-        youtubeTitle:
-          youtubeTitle.trim() || stripFileExtension(videoFile.name).trim() || "Produced Video",
-        youtubeDescription: youtubeDescription.trim(),
-        youtubePrivacyStatus,
-        youtubeTags: youtubeTags.trim(),
-      };
-
-      let formData: FormData;
-      try {
-        setStatusMessage("Uploading video to cloud storage...");
-        const uploadedVideo = await upload(buildUploadPathname(videoFile), videoFile, {
-          access: "public",
-          handleUploadUrl: "/api/uploads",
-          contentType: videoFile.type || "video/mp4",
-          onUploadProgress: (progress) => {
-            setStatusMessage(`Uploading video to cloud storage... ${progress.percentage.toFixed(0)}%`);
-          },
-        });
-
-        formData = buildRenderFormData({
-          ...baseRenderInput,
-          videoUrl: uploadedVideo.url,
-          videoFilename: videoFile.name,
-          videoContentType: videoFile.type || "video/mp4",
-          videoSize: videoFile.size,
-          videoLastModified: videoFile.lastModified,
-        });
-      } catch (uploadError) {
-        const message =
-          uploadError instanceof Error ? uploadError.message : "Unable to upload video to storage.";
-        if (videoFile.size > DIRECT_UPLOAD_REQUIRED_THRESHOLD_BYTES) {
-          throw new Error(
-            `Direct upload failed before render start (${message}). Configure Vercel Blob (BLOB_READ_WRITE_TOKEN) to process files over 4 MB.`,
-          );
-        }
-
-        setStatusMessage("Cloud upload unavailable. Falling back to direct request...");
-        formData = buildRenderFormData({
-          ...baseRenderInput,
-          videoFile,
-        });
-      }
+      });
 
       setStatusMessage("Starting render job...");
 
@@ -754,7 +524,7 @@ export default function Home() {
             <p className="text-xs uppercase tracking-[0.2em] text-[#94a1ac]">Phase 1</p>
             <h2 className="mt-1 text-xl font-semibold">Intro & Outro Maker</h2>
             <p className="mt-2 text-sm text-[#b8c3cb]">
-              Logo fades from white to full color on background
+              Logo fades from transparent to white to full color on background
               <span className="font-semibold text-[#e6edf1]"> {INTRO_OUTRO_BACKGROUND}</span>.
             </p>
 
@@ -1011,117 +781,10 @@ export default function Home() {
             </label>
 
             <div className="mt-4 rounded-2xl border border-[#667684]/35 bg-[#242f38]/70 p-4">
-              <p className="text-sm text-[#d6dde2]">YouTube Sync</p>
-
-              {!youtubeConnection?.configured ? (
-                <p className="mt-2 text-xs text-amber-200">
-                  Set <span className="font-semibold text-[#e6edf1]">YOUTUBE_CLIENT_ID</span> and{" "}
-                  <span className="font-semibold text-[#e6edf1]">YOUTUBE_CLIENT_SECRET</span> on the
-                  server to enable YouTube posting.
-                </p>
-              ) : null}
-
-              {youtubeConnection?.configured && !youtubeConnection.connected ? (
-                <div className="mt-3 flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    disabled={youtubeBusy}
-                    onClick={handleYouTubeConnect}
-                    className="inline-flex h-10 items-center justify-center rounded-full bg-[#aab6bf] px-4 text-sm font-semibold text-[#161d22] transition hover:bg-[#bec8cf] disabled:cursor-not-allowed disabled:opacity-55"
-                  >
-                    {youtubeBusy ? "Connecting..." : "Connect YouTube"}
-                  </button>
-                  <span className="text-xs text-[#b1bcc5]">
-                    {youtubeConnection.message || "Connect your account to enable auto-post."}
-                  </span>
-                </div>
-              ) : null}
-
-              {youtubeConnection?.configured && youtubeConnection.connected ? (
-                <div className="mt-3 space-y-3">
-                  <div className="flex flex-wrap items-center gap-3 text-xs text-[#bcc7cf]">
-                    <span>
-                      Connected:
-                      <span className="font-semibold text-[#e6edf1]">
-                        {" "}
-                        {youtubeConnection.channelTitle || youtubeConnection.channelId || "YouTube account"}
-                      </span>
-                    </span>
-                    <button
-                      type="button"
-                      disabled={youtubeBusy}
-                      onClick={handleYouTubeDisconnect}
-                      className="inline-flex h-9 items-center justify-center rounded-full border border-[#7a8a97]/45 px-3 text-xs font-semibold text-[#dde4e9] transition hover:bg-[#9ba9b3]/15 disabled:cursor-not-allowed disabled:opacity-55"
-                    >
-                      Disconnect
-                    </button>
-                  </div>
-
-                  <label className="flex items-center gap-2 text-sm text-[#d0d8de]">
-                    <input
-                      type="checkbox"
-                      checked={youtubeAutoPublish}
-                      onChange={(event) => setYouTubeAutoPublish(event.target.checked)}
-                      className="h-4 w-4 rounded border-[#7a8a97]/55 bg-transparent"
-                    />
-                    Auto-post this render to YouTube
-                  </label>
-
-                  {youtubeAutoPublish ? (
-                    <div className="grid gap-3">
-                      <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
-                        <span>YouTube title</span>
-                        <input
-                          type="text"
-                          maxLength={100}
-                          value={youtubeTitle}
-                          onChange={(event) => setYouTubeTitle(event.target.value)}
-                          className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
-                        />
-                      </label>
-                      <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
-                        <span>Description</span>
-                        <textarea
-                          rows={3}
-                          maxLength={5000}
-                          value={youtubeDescription}
-                          onChange={(event) => setYouTubeDescription(event.target.value)}
-                          className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
-                        />
-                      </label>
-                      <div className="grid gap-1.5 text-xs text-[#b8c3cb]">
-                        <span>Privacy</span>
-                        <div className="flex flex-wrap gap-2">
-                          {(["private", "unlisted", "public"] as const).map((value) => (
-                            <button
-                              key={value}
-                              type="button"
-                              onClick={() => setYouTubePrivacyStatus(value)}
-                              className={`inline-flex h-9 items-center justify-center rounded-full px-3 text-xs font-semibold transition ${
-                                youtubePrivacyStatus === value
-                                  ? "bg-[#aab6bf] text-[#161d22]"
-                                  : "border border-[#7a8a97]/55 text-[#e6edf1] hover:bg-[#9ba9b3]/15"
-                              }`}
-                            >
-                              {value}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      <label className="grid gap-1.5 text-xs text-[#b8c3cb]">
-                        <span>Tags (comma separated, optional)</span>
-                        <input
-                          type="text"
-                          value={youtubeTags}
-                          onChange={(event) => setYouTubeTags(event.target.value)}
-                          className="rounded-xl border border-[#667684]/35 bg-[#2b3640] px-3 py-2.5 text-sm text-[#e6edf1]"
-                          placeholder="brand, interview, wellness"
-                        />
-                      </label>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
+              <p className="text-sm text-[#d6dde2]">Local-only mode</p>
+              <p className="mt-1 text-xs text-[#a8b4be]">
+                Cloud upload and YouTube sync are disabled. Rendering stays local on this machine.
+              </p>
             </div>
 
             <div className="mt-4 flex flex-wrap gap-3">
@@ -1138,8 +801,7 @@ export default function Home() {
                   !phase3Unlocked ||
                   !logoFile ||
                   !videoFile ||
-                  isSubmitting ||
-                  (youtubeAutoPublish && !youtubeConnection?.connected)
+                  isSubmitting
                 }
                 className="inline-flex h-11 items-center justify-center rounded-full bg-[#aab6bf] px-5 text-sm font-semibold text-[#161d22] transition hover:bg-[#bec8cf] disabled:cursor-not-allowed disabled:opacity-55"
               >
@@ -1168,30 +830,6 @@ export default function Home() {
                 />
               </div>
               <p className="text-xs text-[#b1bcc5]">{renderStatus.message}</p>
-              {renderStatus.youtube ? (
-                <div className="rounded-xl border border-[#5f6e7b]/40 bg-[#2b3640]/70 p-3">
-                  <p className="text-xs text-[#b1bcc5]">
-                    YouTube:{" "}
-                    <span className="font-semibold text-[#e6edf1]">
-                      {renderStatus.youtube.status.toUpperCase()}
-                    </span>
-                  </p>
-                  <p className="mt-1 text-xs text-[#b8c3cb]">{renderStatus.youtube.message}</p>
-                  {renderStatus.youtube.videoUrl ? (
-                    <a
-                      href={renderStatus.youtube.videoUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-2 inline-flex text-xs font-semibold text-[#ccd6dd] underline-offset-2 hover:underline"
-                    >
-                      Open on YouTube
-                    </a>
-                  ) : null}
-                  {renderStatus.youtube.error ? (
-                    <p className="mt-1 text-xs text-red-200">{renderStatus.youtube.error}</p>
-                  ) : null}
-                </div>
-              ) : null}
             </div>
           ) : null}
 
@@ -1227,17 +865,6 @@ export default function Home() {
               >
                 Download Final Video
               </a>
-
-              {renderStatus?.youtube?.videoUrl ? (
-                <a
-                  href={renderStatus.youtube.videoUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex h-11 items-center justify-center rounded-full border border-[#90a0ad]/50 px-5 text-sm font-semibold text-[#d5dde3] transition hover:bg-[#8f9ca7]/15"
-                >
-                  Open on YouTube
-                </a>
-              ) : null}
             </div>
           ) : null}
         </section>
@@ -1246,7 +873,6 @@ export default function Home() {
       <style jsx>{`
         .preview-color-layer {
           animation: preview-logo-color-in 2.8s cubic-bezier(0.2, 0.78, 0.3, 1) infinite;
-          transform-origin: center;
           image-rendering: -webkit-optimize-contrast;
           image-rendering: crisp-edges;
         }
@@ -1254,50 +880,37 @@ export default function Home() {
         .preview-white-layer {
           filter: brightness(0) saturate(100%) invert(100%);
           animation: preview-logo-white-out 2.8s cubic-bezier(0.2, 0.78, 0.3, 1) infinite;
-          transform-origin: center;
           image-rendering: -webkit-optimize-contrast;
           image-rendering: crisp-edges;
         }
 
         @keyframes preview-logo-color-in {
           0% {
-            opacity: 0.14;
-            transform: scale(0.92);
-            filter: saturate(82%) brightness(1.1);
+            opacity: 0;
+            filter: saturate(86%) brightness(1.07);
           }
-          35% {
-            opacity: 0.42;
-            transform: scale(0.95);
-            filter: saturate(88%) brightness(1.07);
-          }
-          68% {
-            opacity: 1;
-            transform: scale(1);
-            filter: none;
+          58% {
+            opacity: 0;
+            filter: saturate(88%) brightness(1.04);
           }
           100% {
             opacity: 1;
-            transform: scale(1);
             filter: none;
           }
         }
 
         @keyframes preview-logo-white-out {
           0% {
-            opacity: 1;
-            transform: scale(0.92);
-          }
-          35% {
-            opacity: 0.78;
-            transform: scale(0.95);
-          }
-          68% {
             opacity: 0;
-            transform: scale(1);
+          }
+          34% {
+            opacity: 1;
+          }
+          58% {
+            opacity: 1;
           }
           100% {
             opacity: 0;
-            transform: scale(1);
           }
         }
       `}</style>
