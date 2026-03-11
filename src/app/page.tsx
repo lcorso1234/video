@@ -670,34 +670,14 @@ export default function Home() {
       let formData: FormData;
       try {
         setStatusMessage("Uploading video to cloud storage...");
-        const uploadPathname = buildUploadPathname(videoFile);
-        let uploadedVideo;
-        try {
-          uploadedVideo = await upload(uploadPathname, videoFile, {
-            access: "public",
-            handleUploadUrl: "/api/uploads",
-            multipart: true,
-            contentType: videoFile.type || "video/mp4",
-            onUploadProgress: (progress) => {
-              setStatusMessage(
-                `Uploading video to cloud storage... ${progress.percentage.toFixed(0)}%`,
-              );
-            },
-          });
-        } catch (multipartError) {
-          setStatusMessage("Multipart upload failed. Retrying with single-request upload...");
-          uploadedVideo = await upload(uploadPathname, videoFile, {
-            access: "public",
-            handleUploadUrl: "/api/uploads",
-            contentType: videoFile.type || "video/mp4",
-            onUploadProgress: (progress) => {
-              setStatusMessage(
-                `Uploading video to cloud storage... ${progress.percentage.toFixed(0)}%`,
-              );
-            },
-          });
-          void multipartError;
-        }
+        const uploadedVideo = await upload(buildUploadPathname(videoFile), videoFile, {
+          access: "public",
+          handleUploadUrl: "/api/uploads",
+          contentType: videoFile.type || "video/mp4",
+          onUploadProgress: (progress) => {
+            setStatusMessage(`Uploading video to cloud storage... ${progress.percentage.toFixed(0)}%`);
+          },
+        });
 
         formData = buildRenderFormData({
           ...baseRenderInput,
