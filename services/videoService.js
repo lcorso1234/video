@@ -7,6 +7,8 @@ const {
   getSubtitleStyle,
   hexToAssBgr,
 } = require("../utils/ffmpeg");
+const transcriptionAudioFilter =
+  "highpass=f=80,lowpass=f=7600,acompressor=threshold=-18dB:ratio=2.6:attack=8:release=140,loudnorm=I=-16:TP=-1.5:LRA=11";
 
 function formatAssTime(seconds) {
   const totalCentiseconds = Math.max(0, Math.round((Number(seconds) || 0) * 100));
@@ -198,6 +200,8 @@ async function extractAudio({ inputVideoPath, outputAudioPath }) {
     "-i",
     inputVideoPath,
     "-vn",
+    "-af",
+    transcriptionAudioFilter,
     "-ac",
     "1",
     "-ar",

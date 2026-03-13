@@ -8,6 +8,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import ffmpegPath from "ffmpeg-static";
+import { inferVideoExtension, inferVideoMimeType } from "@/lib/media-file";
 
 export type RenderMediaSource = File | {
   path: string;
@@ -167,9 +168,14 @@ const fallbackHeight = 1080;
 const defaultSafeExportsRoot = path.join(os.homedir(), "Documents", "Video Editor Exports");
 const defaultTrailerDuration = 3.5;
 const maxTrailerDuration = 12;
+const defaultLowerThirdStartSeconds = 3;
+const defaultLowerThirdDurationSeconds = 6;
 const defaultSubtitleLanguage = "en";
-const defaultSubtitleFontSize = 48;
+const defaultSubtitleFontSize = 76;
+const maxSubtitleFontSize = 120;
 const defaultSubtitleHighlightColor = "#E6FF00";
+const transcriptionAudioFilter =
+  "highpass=f=80,lowpass=f=7600,acompressor=threshold=-18dB:ratio=2.6:attack=8:release=140,loudnorm=I=-16:TP=-1.5:LRA=11";
 const statusProgressMax = 100;
 const defaultTheme: RenderTheme = {
   backgroundColor: "#050816",
@@ -349,9 +355,10 @@ export async function createRenderDraftFromStepOne(input: {
 }) {
   const draftId = randomUUID();
   const directory = getDraftDirectory(draftId);
+  const sourceExtension = inferVideoExtension(input.sourceVideo);
   const sourceStoredPath = path.join(
     directory,
-    `source${getExtension(input.sourceVideo.name, ".mp4")}`,
+    `source${getExtension(input.sourceVideo.name, sourceExtension)}`,
   );
   const subtitleStoredPath = path.join(directory, "subtitles.srt");
   const createdAt = new Date().toISOString();
@@ -362,7 +369,7 @@ export async function createRenderDraftFromStepOne(input: {
 
   const draft: RenderDraft = {
     draftId,
-    sourceFilename: input.sourceVideo.name || "source.mp4",
+    sourceFilename: input.sourceVideo.name || `source${sourceExtension}`,
     sourceStoredPath,
     subtitleFilename: input.subtitleFilename || "subtitles.srt",
     subtitleStoredPath,
@@ -427,7 +434,7 @@ export async function resolveRenderInputFromDraft(draftId: string) {
   const sourceVideo = await fileFromDisk(
     draft.sourceStoredPath,
     draft.sourceFilename,
-    "video/mp4",
+    inferVideoMimeType({ name: draft.sourceFilename }),
   );
 
   let subtitleFile: File | null = null;
@@ -594,8 +601,20 @@ function removeSrtSegmentsInRanges(
     return content;
   }
 
+  sanitizedRanges.sort((left, right) => left.startMs - right.startMs);
+  const mergedRanges: Array<{ startMs: number; endMs: number }> = [];
+  for (const range of sanitizedRanges) {
+    const previous = mergedRanges[mergedRanges.length - 1];
+    if (!previous || range.startMs > previous.endMs) {
+      mergedRanges.push({ ...range });
+      continue;
+    }
+    previous.endMs = Math.max(previous.endMs, range.endMs);
+  }
+
   const blocks = content.split(/\r?\n\r?\n/);
-  const kept: string[] = [];
+  const rewritten: string[] = [];
+  let cueIndex = 1;
 
   for (const block of blocks) {
     const lines = block.split(/\r?\n/).filter((line) => line.length > 0);
@@ -605,38 +624,70 @@ function removeSrtSegmentsInRanges(
 
     const timeLineIndex = lines.findIndex((line) => line.includes("-->"));
     if (timeLineIndex < 0) {
-      kept.push(block);
+      rewritten.push(block);
       continue;
     }
 
-    const match = /^(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/.exec(
+    const match = /^(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})(.*)$/.exec(
       lines[timeLineIndex],
     );
     if (!match) {
-      kept.push(block);
+      rewritten.push(block);
       continue;
     }
 
     const startMs = parseSrtTimestampToMs(match[1]);
     const endMs = parseSrtTimestampToMs(match[2]);
     if (startMs === null || endMs === null) {
-      kept.push(block);
+      rewritten.push(block);
       continue;
     }
 
-    const overlapsHiddenRange = sanitizedRanges.some(
-      (range) => startMs < range.endMs && endMs > range.startMs,
-    );
-    if (!overlapsHiddenRange) {
-      kept.push(block);
+    const cueText = lines.slice(timeLineIndex + 1).join("\n").trim();
+    if (!cueText) {
+      continue;
+    }
+
+    let cursor = startMs;
+    const visibleWindows: Array<{ startMs: number; endMs: number }> = [];
+    for (const hidden of mergedRanges) {
+      if (hidden.endMs <= cursor) {
+        continue;
+      }
+      if (hidden.startMs >= endMs) {
+        break;
+      }
+      if (hidden.startMs > cursor) {
+        visibleWindows.push({
+          startMs: cursor,
+          endMs: Math.min(hidden.startMs, endMs),
+        });
+      }
+      cursor = Math.max(cursor, hidden.endMs);
+      if (cursor >= endMs) {
+        break;
+      }
+    }
+    if (cursor < endMs) {
+      visibleWindows.push({ startMs: cursor, endMs });
+    }
+
+    for (const window of visibleWindows) {
+      if (window.endMs <= window.startMs) {
+        continue;
+      }
+      rewritten.push(
+        `${cueIndex}\n${formatMsToSrtTimestamp(window.startMs)} --> ${formatMsToSrtTimestamp(window.endMs)}${match[3] || ""}\n${cueText}`,
+      );
+      cueIndex += 1;
     }
   }
 
-  if (!kept.length) {
+  if (!rewritten.length) {
     return "";
   }
 
-  return `${kept.join("\n\n").trim()}\n`;
+  return `${rewritten.join("\n\n").trim()}\n`;
 }
 
 function formatSubtitleChunkWords(words: string[]) {
@@ -739,43 +790,86 @@ function escapeAssText(value: string) {
     .replace(/\r?\n/g, "\\N");
 }
 
+type TimedWord = {
+  word: string;
+  start: number;
+  end: number;
+  confidence: number;
+};
+
 function normalizeWordsPayload(payload: unknown) {
   if (!payload || typeof payload !== "object" || !("words" in payload)) {
-    return [];
+    return [] as TimedWord[];
   }
   const wordsRaw = (payload as { words?: unknown }).words;
   if (!Array.isArray(wordsRaw)) {
-    return [];
+    return [] as TimedWord[];
   }
 
-  return wordsRaw
+  const normalized = wordsRaw
     .filter((word) => word && typeof word === "object")
     .map((word) => {
       const token = String((word as { word?: unknown }).word || "").trim();
       const start = Number((word as { start?: unknown }).start);
       const end = Number((word as { end?: unknown }).end);
+      const confidenceValue = Number(
+        (word as { conf?: unknown; confidence?: unknown }).conf ??
+          (word as { conf?: unknown; confidence?: unknown }).confidence,
+      );
+      const confidence = Number.isFinite(confidenceValue)
+        ? Math.max(0, Math.min(1, confidenceValue))
+        : 1;
+      const normalizedToken = token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
       return {
-        word: token,
+        word: normalizedToken || token,
         start: Number.isFinite(start) ? start : 0,
         end: Number.isFinite(end) ? end : start + 0.08,
+        confidence,
       };
     })
     .filter((word) => word.word.length > 0)
+    .filter((word) => /[\p{L}\p{N}]/u.test(word.word))
+    .filter((word) => word.confidence >= 0.12)
     .sort((a, b) => a.start - b.start)
     .map((word) => ({
       word: word.word,
       start: Math.max(0, word.start),
       end: Math.max(word.start + 0.05, word.end),
+      confidence: word.confidence,
     }));
+
+  const deduped: TimedWord[] = [];
+  for (const word of normalized) {
+    const previous = deduped[deduped.length - 1];
+    if (!previous) {
+      deduped.push(word);
+      continue;
+    }
+
+    const sameToken = previous.word.toLowerCase() === word.word.toLowerCase();
+    const nearDuplicateTiming =
+      Math.abs(previous.start - word.start) < 0.035 &&
+      Math.abs(previous.end - word.end) < 0.055;
+    if (sameToken && nearDuplicateTiming) {
+      if (word.confidence > previous.confidence) {
+        deduped[deduped.length - 1] = word;
+      }
+      continue;
+    }
+
+    deduped.push(word);
+  }
+
+  return deduped;
 }
 
-function groupWordsForSingleLineKaraoke(words: Array<{ word: string; start: number; end: number }>) {
+function groupWordsForSingleLineKaraoke(words: TimedWord[]) {
   const groups: Array<{
-    words: Array<{ word: string; start: number; end: number }>;
+    words: TimedWord[];
     start: number;
     end: number;
   }> = [];
-  let current: Array<{ word: string; start: number; end: number }> = [];
+  let current: TimedWord[] = [];
 
   const flush = () => {
     if (!current.length) {
@@ -800,8 +894,8 @@ function groupWordsForSingleLineKaraoke(words: Array<{ word: string; start: numb
     const elapsed = word.end - current[0].start;
     const punctuationBreak = /[.!?]$/.test(previous.word);
     const maxWords = current.length >= 5;
-    const maxDuration = elapsed > 3.2;
-    const hardGap = gap > 0.75;
+    const maxDuration = elapsed > 2.8;
+    const hardGap = gap > 0.55;
 
     if (punctuationBreak || maxWords || maxDuration || hardGap) {
       flush();
@@ -815,7 +909,7 @@ function groupWordsForSingleLineKaraoke(words: Array<{ word: string; start: numb
 }
 
 function buildAssKaraokeText(
-  lineWords: Array<{ word: string; start: number; end: number }>,
+  lineWords: TimedWord[],
   activeIndex: number,
 ) {
   return lineWords
@@ -830,7 +924,7 @@ function buildAssKaraokeText(
 }
 
 function buildAssFromTimedWords(input: {
-  words: Array<{ word: string; start: number; end: number }>;
+  words: TimedWord[];
   fontFamily: string;
   fontSize: number;
   textColor: string;
@@ -852,7 +946,10 @@ function buildAssFromTimedWords(input: {
     return "";
   }
 
-  const safeFontSize = Math.max(12, Math.min(72, Number(input.fontSize) || defaultSubtitleFontSize));
+  const safeFontSize = Math.max(
+    12,
+    Math.min(maxSubtitleFontSize, Number(input.fontSize) || defaultSubtitleFontSize),
+  );
   const textBgr = toAssBgrHex(input.textColor || "#ffffff");
   const highlightBgr = toAssBgrHex(input.highlightColor || defaultSubtitleHighlightColor);
   const highlightTextBgr = toAssBgrHex(getReadableTextColorHex(input.highlightColor));
@@ -880,7 +977,13 @@ function buildAssFromTimedWords(input: {
       const current = group.words[i];
       const next = group.words[i + 1];
       const start = current.start;
-      const end = Math.max(start + 0.06, Math.min(group.end, next ? next.start : current.end));
+      const minDuration = 0.07;
+      const naturalEnd = Math.max(start + minDuration, current.end + 0.04);
+      const nextStartLimit = next ? Math.max(start + minDuration, next.start - 0.015) : group.end;
+      const end = Math.max(
+        start + minDuration,
+        Math.min(group.end, naturalEnd, nextStartLimit),
+      );
       const text = buildAssKaraokeText(group.words, i);
       events.push(
         `Dialogue: 0,${formatAssTime(start)},${formatAssTime(end)},Default,,0,0,0,,${text}`,
@@ -932,7 +1035,7 @@ function buildSubtitleForceStyle(input: RenderVideoInput) {
     .replace(/'/g, "");
   const fontSize = Math.max(
     12,
-    Math.min(72, Number(input.subtitleFontSize) || defaultSubtitleFontSize),
+    Math.min(maxSubtitleFontSize, Number(input.subtitleFontSize) || defaultSubtitleFontSize),
   );
   const textBgr = toAssBgrHex(input.subtitleTextColor || "#ffffff");
   const highlightBgr = toAssBgrHex(input.subtitleHighlightColor || defaultSubtitleHighlightColor);
@@ -988,6 +1091,8 @@ async function extractAudioFromConcatList(params: {
     "-i",
     params.concatListPath,
     "-vn",
+    "-af",
+    transcriptionAudioFilter,
     "-ac",
     "1",
     "-ar",
@@ -1006,6 +1111,8 @@ async function extractAudioFromVideo(params: { inputPath: string; outputPath: st
     "-i",
     params.inputPath,
     "-vn",
+    "-af",
+    transcriptionAudioFilter,
     "-ac",
     "1",
     "-ar",
@@ -1071,6 +1178,26 @@ function normalizeHexColor(value: string | undefined, fallback: string) {
 
 function toFfmpegHex(value: string) {
   return `0x${value.replace("#", "")}`;
+}
+
+function blendHexColors(baseHex: string, mixHex: string, mixRatio: number) {
+  const base = baseHex.replace("#", "");
+  const mix = mixHex.replace("#", "");
+  if (!/^[0-9a-fA-F]{6}$/.test(base) || !/^[0-9a-fA-F]{6}$/.test(mix)) {
+    return "#1b2430";
+  }
+
+  const ratio = Math.max(0, Math.min(1, mixRatio));
+  const blendChannel = (baseOffset: number) => {
+    const from = Number.parseInt(base.slice(baseOffset, baseOffset + 2), 16);
+    const to = Number.parseInt(mix.slice(baseOffset, baseOffset + 2), 16);
+    return Math.round(from * (1 - ratio) + to * ratio);
+  };
+
+  const red = blendChannel(0);
+  const green = blendChannel(2);
+  const blue = blendChannel(4);
+  return `#${[red, green, blue].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function isLightColor(value: string) {
@@ -1423,12 +1550,12 @@ function buildVideoFilter(
     subtitleText ? Math.round(target.height * 0.09) : Math.round(target.height * 0.065),
     contentHeight + verticalPadding * 2,
   );
-  const margin = Math.max(22, Math.round(target.width * 0.018));
-  const boxX = target.width - boxWidth - margin;
-  const boxY = target.height - boxHeight - margin;
+  const bottomMargin = Math.max(22, Math.round(target.width * 0.018));
+  const boxX = target.width - boxWidth;
+  const boxY = target.height - boxHeight - bottomMargin;
   const titleY = boxY + verticalPadding;
   const subtitleY = titleY + titleSize + lineGap;
-  const slideDuration = Math.max(0.25, Math.min(0.7, (end - start) * 0.2));
+  const slideDuration = getLowerThirdSlideDuration(end - start);
   const offscreenX = target.width + Math.max(26, Math.round(target.width * 0.018));
   const slideProgress = `((t-${start})/${slideDuration})`;
   const animatedBoxX = `if(lt(t\\,${start + slideDuration})\\,${offscreenX}+(${boxX - offscreenX})*${slideProgress}\\,${boxX})`;
@@ -1441,8 +1568,9 @@ function buildVideoFilter(
   const animatedSubtitleX = `if(lt(t\\,${start + slideDuration})\\,${subtitleStartX}+(${subtitleTargetX - subtitleStartX})*${slideProgress}\\,${subtitleTargetX})`;
   const enable = `between(t\\,${start}\\,${end})`;
   const font = fontPath ? `:fontfile='${escapeFilterValue(fontPath)}'` : "";
-  const boxColor = `${toFfmpegHex(theme.backgroundColor)}@0.82`;
-  const boxBorderColor = `${toFfmpegHex(theme.accentColor)}@0.5`;
+  const lowerThirdPanelColor = blendHexColors(theme.accentColor, "#05080d", 0.78);
+  const boxColor = `${toFfmpegHex(lowerThirdPanelColor)}@0.9`;
+  const boxBorderColor = `${toFfmpegHex(theme.accentColor)}@0.72`;
   const boxShadowColor = "0x000000@0.35";
   const accentColor = `${toFfmpegHex(theme.accentColor)}@0.96`;
   const textColor = isLightColor(theme.textColor)
@@ -1472,6 +1600,11 @@ function buildVideoFilter(
   }
 
   return filters.join(",");
+}
+
+function getLowerThirdSlideDuration(durationSeconds: number) {
+  const safeDuration = Math.max(0.5, Number(durationSeconds) || 0);
+  return Math.max(0.25, Math.min(0.7, safeDuration * 0.2));
 }
 
 function buildRetroTvFilter() {
@@ -1613,9 +1746,9 @@ async function createTrailerBrandClip(params: {
   const introSubtitle = params.subtitle?.trim() || "A cinematic AI-finished trailer";
   const outroTitle = params.title?.trim() || "THANK YOU FOR WATCHING";
   const outroSubtitle = params.subtitle?.trim() || "Stay tuned for the next release";
-  const logoTransparentToWhiteDuration = Math.max(0.32, duration * 0.34);
-  const logoWhiteHoldEnd = Math.max(logoTransparentToWhiteDuration + 0.22, duration * 0.58);
-  const logoWhiteToColorDuration = Math.max(0.25, duration - logoWhiteHoldEnd);
+  const introLogoFadeDuration = Math.min(0.75, Math.max(0.24, duration * 0.28));
+  const outroTextFadeDuration = Math.min(0.9, Math.max(0.32, duration * 0.34));
+  const outroTextAlphaExpr = `if(lt(t\\,${outroTextFadeDuration})\\,t/${outroTextFadeDuration}\\,1)`;
   const contentAlphaExpr = "1";
   const baseColor = "0x2A3439";
   const textColor = toFfmpegHex(params.theme.textColor);
@@ -1653,17 +1786,18 @@ async function createTrailerBrandClip(params: {
   let visualLabel = "[0:v]";
   if (logoInputIndex !== null) {
     const logoScale = Math.max(
-      200,
-      Math.round(params.target.width * (params.outro ? 0.14 : 0.18)),
+      params.outro ? 170 : 200,
+      Math.round(params.target.width * (params.outro ? 0.13 : 0.18)),
     );
-    filters.push(
-      `[${logoInputIndex}:v]format=rgba,scale=${logoScale}:-1:force_original_aspect_ratio=decrease[logo-base]`,
-      `[logo-base]split=3[logo-color][logo-transparent-src][logo-white-src]`,
-      `[logo-transparent-src]colorchannelmixer=aa=0[logo-transparent]`,
-      `[logo-white-src]eq=contrast=0:brightness=0.5[logo-white]`,
-      `[logo-transparent][logo-white]blend=all_expr='if(lte(T,${logoTransparentToWhiteDuration}),A*(1-(T/${logoTransparentToWhiteDuration}))+B*(T/${logoTransparentToWhiteDuration}),B)'[logo-phase-white]`,
-      `[logo-phase-white][logo-color]blend=all_expr='if(lte(T,${logoWhiteHoldEnd}),A,if(gte(T,${duration}),B,A*(1-((T-${logoWhiteHoldEnd})/${logoWhiteToColorDuration}))+B*((T-${logoWhiteHoldEnd})/${logoWhiteToColorDuration})))',colorchannelmixer=aa=1[logo]`,
-    );
+    if (params.outro) {
+      filters.push(
+        `[${logoInputIndex}:v]format=rgba,scale=${logoScale}:-1:force_original_aspect_ratio=decrease[logo]`,
+      );
+    } else {
+      filters.push(
+        `[${logoInputIndex}:v]format=rgba,scale=${logoScale}:-1:force_original_aspect_ratio=decrease,fade=t=in:st=0:d=${introLogoFadeDuration}:alpha=1[logo]`,
+      );
+    }
   }
 
   if (!params.outro) {
@@ -1716,7 +1850,7 @@ async function createTrailerBrandClip(params: {
         const escapedLine = escapeFilterValue(outroLines[i]);
         const lineY = creditsStartY + i * lineHeight;
         filters.push(
-          `${currentLabel}drawtext=text='${escapedLine}'${font}:fontcolor=${textColor}@0.95:fontsize=${creditsFontSize}:x=(w-text_w)/2:y=${lineY}:alpha='${contentAlphaExpr}'${i === 0 ? ":borderw=2:bordercolor=black@0.52:shadowcolor=black@0.35:shadowx=2:shadowy=2" : ""}${nextLabel}`,
+          `${currentLabel}drawtext=text='${escapedLine}'${font}:fontcolor=${textColor}@0.95:fontsize=${creditsFontSize}:x=(w-text_w)/2:y=${lineY}:alpha='${outroTextAlphaExpr}'${i === 0 ? ":borderw=2:bordercolor=black@0.52:shadowcolor=black@0.35:shadowx=2:shadowy=2" : ""}${nextLabel}`,
         );
         currentLabel = nextLabel;
       }
@@ -1854,9 +1988,10 @@ export async function generateSubtitlesFromSourceVideo(input: {
   const language = (input.subtitleLanguage || defaultSubtitleLanguage).trim() || defaultSubtitleLanguage;
   const tempId = randomUUID();
   const tempDirectory = path.join(jobsRoot, "subtitle-only", tempId);
+  const sourceExtension = inferVideoExtension(input.sourceVideo);
   const sourceUploadPath = path.join(
     tempDirectory,
-    `source${getExtension(input.sourceVideo.name)}`,
+    `source${getExtension(input.sourceVideo.name, sourceExtension)}`,
   );
   const extractedAudioPath = path.join(tempDirectory, "speech.wav");
   const subtitlePath = path.join(tempDirectory, `${tempId}.srt`);
@@ -1941,9 +2076,10 @@ export async function renderVideo(
   });
 
   try {
+    const sourceExtension = inferVideoExtension(input.sourceVideo);
     const sourceUploadPath = path.join(
       uploadsDirectory,
-      `source${getExtension(input.sourceVideo.name)}`,
+      `source${getExtension(input.sourceVideo.name, sourceExtension)}`,
     );
 
     if (isStoredRenderMediaSource(input.sourceVideo)) {
@@ -2138,19 +2274,31 @@ export async function renderVideo(
         ? {
             title: input.lowerThirdTitle?.trim(),
             subtitle: input.lowerThirdSubtitle?.trim(),
-            start: input.lowerThirdStart ?? 4,
-            duration: input.lowerThirdDuration ?? 6,
+            start: Math.max(
+              0,
+              Number(input.lowerThirdStart ?? defaultLowerThirdStartSeconds) ||
+                defaultLowerThirdStartSeconds,
+            ),
+            duration: Math.max(
+              0.5,
+              Number(input.lowerThirdDuration ?? defaultLowerThirdDurationSeconds) ||
+                defaultLowerThirdDurationSeconds,
+            ),
           }
         : null;
-    const lowerThirdHideRanges = lowerThird
-      ? [
-          {
-            startSeconds: lowerThird.start,
-            endSeconds: lowerThird.start + lowerThird.duration,
-          },
-        ]
-      : [];
-    const subtitleHideRanges = burnSubtitles ? lowerThirdHideRanges : [];
+    const subtitleEntryEndSeconds =
+      burnSubtitles && lowerThird
+        ? lowerThird.start + getLowerThirdSlideDuration(lowerThird.duration)
+        : 0;
+    const subtitleHideRanges =
+      subtitleEntryEndSeconds > 0.01
+        ? [
+            {
+              startSeconds: 0,
+              endSeconds: subtitleEntryEndSeconds,
+            },
+          ]
+        : [];
 
     if (subtitlesEnabled) {
       const subtitleLanguage =

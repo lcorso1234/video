@@ -4,6 +4,7 @@ import { mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { NextResponse } from "next/server";
 import { renderVideo } from "@/lib/video-editor";
+import { inferVideoExtension, inferVideoMimeType, isLikelyVideoFile } from "@/lib/media-file";
 
 export const runtime = "nodejs";
 
@@ -329,6 +330,12 @@ export async function POST(request: Request) {
     if (!(video instanceof File) || video.size === 0) {
       return NextResponse.json({ error: "Video upload is required." }, { status: 400 });
     }
+    if (!isLikelyVideoFile(video)) {
+      return NextResponse.json(
+        { error: "Video must be a supported format (.mp4, .mov, .m4v, .webm, .mkv, .avi)." },
+        { status: 400 },
+      );
+    }
 
     if (!process.env.VOSK_MODEL_PATH?.trim()) {
       return NextResponse.json(
@@ -341,10 +348,11 @@ export async function POST(request: Request) {
     }
 
     const jobId = randomUUID();
+    const sourceExtension = inferVideoExtension(video);
     const clonedSourceVideo = new File(
       [await video.arrayBuffer()],
-      video.name || "source.mp4",
-      { type: video.type || "video/mp4" },
+      video.name || `source${sourceExtension}`,
+      { type: inferVideoMimeType(video) },
     );
     const rawLogo = getOptionalFile(formData.get("logo"));
     const clonedLogoFile = rawLogo
@@ -358,7 +366,7 @@ export async function POST(request: Request) {
       renderSpeedMode: getRenderSpeedMode(formData.get("renderSpeedMode")),
       language: getText(formData.get("subtitleLanguage"), "en"),
       fontChoice: getText(formData.get("subtitleFontChoice"), "Poppins"),
-      fontSize: getNumber(formData.get("subtitleFontSize"), 48),
+      fontSize: getNumber(formData.get("subtitleFontSize"), 76),
       subtitleTextColor: getText(formData.get("subtitleTextColor"), "#ffffff"),
       highlightColor: getText(formData.get("subtitleHighlightColor"), "#19b5fe"),
       generateTrailerIntroOutro: getBoolean(formData.get("generateTrailerIntroOutro"), true),
@@ -377,7 +385,7 @@ export async function POST(request: Request) {
       soundtrackChoice: getSoundtrackChoice(formData.get("soundtrackChoice")),
       lowerThirdTitle: getText(formData.get("lowerThirdTitle")),
       lowerThirdSubtitle: getText(formData.get("lowerThirdSubtitle")),
-      lowerThirdStart: getNumber(formData.get("lowerThirdStart"), 4),
+      lowerThirdStart: getNumber(formData.get("lowerThirdStart"), 3),
       lowerThirdDuration: getNumber(formData.get("lowerThirdDuration"), 6),
     };
 

@@ -3,6 +3,7 @@ import {
   createRenderDraftFromStepOne,
   generateSubtitlesFromSourceVideo,
 } from "@/lib/video-editor";
+import { isLikelyVideoFile } from "@/lib/media-file";
 
 export const runtime = "nodejs";
 
@@ -14,6 +15,12 @@ export async function POST(request: Request) {
     if (!(sourceVideo instanceof File) || sourceVideo.size === 0) {
       return NextResponse.json(
         { error: "Upload a main source video to generate subtitles." },
+        { status: 400 },
+      );
+    }
+    if (!isLikelyVideoFile(sourceVideo)) {
+      return NextResponse.json(
+        { error: "Video must be a supported format (.mp4, .mov, .m4v, .webm, .mkv, .avi)." },
         { status: 400 },
       );
     }

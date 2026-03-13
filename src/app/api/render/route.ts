@@ -6,9 +6,10 @@ import {
   resolveRenderInputFromDraft,
   type RenderMediaSource,
 } from "@/lib/video-editor";
+import { isLikelyVideoFile } from "@/lib/media-file";
 
 export const runtime = "nodejs";
-const DEFAULT_SUBTITLE_FONT_SIZE = 48;
+const DEFAULT_SUBTITLE_FONT_SIZE = 76;
 const DEFAULT_SUBTITLE_HIGHLIGHT_COLOR = "#E6FF00";
 const DEFAULT_SUBTITLE_TEXT_COLOR = "#ffffff";
 const LOGO_ALLOWED_MIME_TYPES = new Set([
@@ -263,6 +264,9 @@ export async function POST(request: Request) {
     if (!sourceVideo) {
       return errorResponse("Video upload is required.");
     }
+    if (!isLikelyVideoFile(sourceVideo)) {
+      return errorResponse("Video must be a supported format (.mp4, .mov, .m4v, .webm, .mkv, .avi).");
+    }
 
     const rawSubtitle = getOptionalFile(formData.get("subtitleFile")) || draftInput?.subtitleFile || null;
     if (!rawSubtitle && !process.env.VOSK_MODEL_PATH?.trim()) {
@@ -317,7 +321,7 @@ export async function POST(request: Request) {
       soundtrackChoice: getSoundtrackChoice(formData.get("soundtrackChoice")),
       lowerThirdTitle: getText(formData.get("lowerThirdTitle")),
       lowerThirdSubtitle: getText(formData.get("lowerThirdSubtitle")),
-      lowerThirdStart: getNumber(formData.get("lowerThirdStart"), 4),
+      lowerThirdStart: getNumber(formData.get("lowerThirdStart"), 3),
       lowerThirdDuration: getNumber(formData.get("lowerThirdDuration"), 6),
       cleanupDirectories: temporaryDirectories,
     };

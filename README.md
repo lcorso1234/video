@@ -16,6 +16,33 @@ bun dev
 
 Open [http://localhost:3004](http://localhost:3004) with your browser to see the result.
 
+## Electron Desktop App
+
+Run the app in Electron (this starts Next.js and Electron together):
+
+```bash
+npm run electron:dev
+```
+
+If you already have the Next server running on `http://localhost:3004`, you can open only the Electron shell:
+
+```bash
+npm run electron
+```
+
+## Supported Source Video Uploads
+
+Main source uploads accept common video formats including:
+
+- `.mp4`
+- `.mov`
+- `.m4v`
+- `.webm`
+- `.mkv`
+- `.avi`
+
+Output renders are generated as `.mp4`.
+
 ## Fast Backend Branding Test
 
 Run the server in one terminal:

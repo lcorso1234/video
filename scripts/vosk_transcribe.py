@@ -20,6 +20,21 @@ def format_srt_timestamp(seconds_value: float) -> str:
 def clean_text(value: str) -> str:
     return " ".join((value or "").replace("\r", " ").replace("\n", " ").split()).strip()
 
+def safe_float(value, fallback: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if parsed != parsed:
+        return fallback
+    return parsed
+
+def normalize_token(value: str) -> str:
+    token = clean_text(value).strip(".,!?;:\"'()[]{}")
+    if token in {"[unk]", "<unk>"}:
+        return ""
+    return token
+
 
 def append_estimated_word_timings(
     text: str,
@@ -39,13 +54,17 @@ def append_estimated_word_timings(
     chunk = span / len(words)
     cursor = start
     for token in words:
+        normalized = normalize_token(token)
+        if not normalized:
+            continue
         word_start = cursor
         word_end = min(end, word_start + chunk)
         timed_words.append(
             {
-                "word": token,
+                "word": normalized,
                 "start": round(word_start, 3),
                 "end": round(max(word_end, word_start + 0.05), 3),
+                "conf": 0.35,
             }
         )
         cursor = word_end
@@ -58,32 +77,36 @@ def append_segment_from_result(
 ) -> None:
     words = payload.get("result") or []
     if isinstance(words, list) and len(words) > 0:
-        text_words = []
         structured_words: list[dict[str, float | str]] = []
         for word in words:
             if isinstance(word, dict):
-                value = str(word.get("word") or "").strip()
-                if value:
-                    text_words.append(value)
-                    start = float(word.get("start", 0.0))
-                    end = float(word.get("end", max(start + 0.05, start)))
-                    structured_words.append(
-                        {
-                            "word": value,
-                            "start": round(start, 3),
-                            "end": round(max(end, start + 0.05), 3),
-                        }
-                    )
-        text = " ".join(text_words).strip()
+                value = normalize_token(str(word.get("word") or ""))
+                if not value:
+                    continue
+                start = safe_float(word.get("start"), 0.0)
+                end = safe_float(word.get("end"), max(start + 0.05, start))
+                confidence = safe_float(
+                    word.get("conf", word.get("confidence", 1.0)),
+                    1.0,
+                )
+                structured_words.append(
+                    {
+                        "word": value,
+                        "start": round(start, 3),
+                        "end": round(max(end, start + 0.05), 3),
+                        "conf": round(max(0.0, min(1.0, confidence)), 3),
+                    }
+                )
+        text = " ".join(str(item.get("word") or "") for item in structured_words).strip()
         start = (
-            float(structured_words[0].get("start", 0.0))
+            safe_float(structured_words[0].get("start"), 0.0)
             if len(structured_words) > 0
-            else float(words[0].get("start", 0.0))
+            else safe_float(words[0].get("start"), 0.0)
         )
         end = (
-            float(structured_words[-1].get("end", max(start + 0.2, start)))
+            safe_float(structured_words[-1].get("end"), max(start + 0.2, start))
             if len(structured_words) > 0
-            else float(words[-1].get("end", max(start + 0.2, start)))
+            else safe_float(words[-1].get("end"), max(start + 0.2, start))
         )
         if text:
             segments.append((start, max(end, start + 0.2), text))
@@ -99,6 +122,99 @@ def append_segment_from_result(
     estimated_end = last_end + estimated_duration
     segments.append((last_end, estimated_end, text))
     append_estimated_word_timings(text, last_end, estimated_end, timed_words)
+
+def dedupe_timed_words(
+    timed_words: list[dict[str, float | str]],
+) -> list[dict[str, float | str]]:
+    sorted_words = sorted(
+        timed_words,
+        key=lambda item: (
+            safe_float(item.get("start"), 0.0),
+            safe_float(item.get("end"), 0.0),
+        ),
+    )
+    deduped: list[dict[str, float | str]] = []
+    for raw in sorted_words:
+        token = normalize_token(str(raw.get("word") or ""))
+        if not token:
+            continue
+        start = max(0.0, safe_float(raw.get("start"), 0.0))
+        end = max(start + 0.05, safe_float(raw.get("end"), start + 0.05))
+        conf = max(0.0, min(1.0, safe_float(raw.get("conf", 1.0), 1.0)))
+        current = {
+            "word": token,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "conf": round(conf, 3),
+        }
+
+        previous = deduped[-1] if deduped else None
+        if previous:
+            prev_token = str(previous.get("word") or "").lower()
+            prev_start = safe_float(previous.get("start"), 0.0)
+            prev_end = safe_float(previous.get("end"), prev_start + 0.05)
+            prev_conf = safe_float(previous.get("conf", 1.0), 1.0)
+            close_boundary = start <= prev_end + 0.12 and abs(start - prev_start) <= 0.22
+            if prev_token == token.lower() and close_boundary:
+                if conf >= prev_conf:
+                    previous["start"] = round(min(prev_start, start), 3)
+                    previous["end"] = round(max(prev_end, end), 3)
+                    previous["conf"] = round(conf, 3)
+                else:
+                    previous["end"] = round(max(prev_end, end), 3)
+                continue
+
+        deduped.append(current)
+
+    return deduped
+
+def build_segments_from_timed_words(
+    timed_words: list[dict[str, float | str]],
+) -> list[tuple[float, float, str]]:
+    if not timed_words:
+        return []
+
+    words = dedupe_timed_words(timed_words)
+    if not words:
+        return []
+
+    groups: list[list[dict[str, float | str]]] = []
+    current: list[dict[str, float | str]] = []
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            groups.append(current)
+            current = []
+
+    for word in words:
+        start = safe_float(word.get("start"), 0.0)
+        end = safe_float(word.get("end"), start + 0.05)
+        if not current:
+            current.append(word)
+            continue
+
+        previous = current[-1]
+        prev_end = safe_float(previous.get("end"), safe_float(previous.get("start"), 0.0) + 0.05)
+        gap = max(0.0, start - prev_end)
+        elapsed = end - safe_float(current[0].get("start"), 0.0)
+
+        if gap > 0.62 or len(current) >= 8 or elapsed > 3.8:
+            flush()
+        current.append(word)
+
+    flush()
+
+    segments: list[tuple[float, float, str]] = []
+    for group in groups:
+        text = clean_text(" ".join(str(item.get("word") or "") for item in group))
+        if not text:
+            continue
+        start = safe_float(group[0].get("start"), 0.0)
+        end = safe_float(group[-1].get("end"), start + 0.2)
+        segments.append((start, max(end, start + 0.2), text))
+
+    return segments
 
 
 def main() -> int:
@@ -131,6 +247,8 @@ def main() -> int:
         model = Model(args.model)
         recognizer = KaldiRecognizer(model, sample_rate)
         recognizer.SetWords(True)
+        if hasattr(recognizer, "SetPartialWords"):
+            recognizer.SetPartialWords(True)
 
         segments: list[tuple[float, float, str]] = []
         timed_words: list[dict[str, float | str]] = []
@@ -142,7 +260,11 @@ def main() -> int:
                 append_segment_from_result(json.loads(recognizer.Result()), segments, timed_words)
         append_segment_from_result(json.loads(recognizer.FinalResult()), segments, timed_words)
 
-    if len(segments) == 0:
+    normalized_words = dedupe_timed_words(timed_words)
+    derived_segments = build_segments_from_timed_words(normalized_words)
+    final_segments = derived_segments if len(derived_segments) > 0 else segments
+
+    if len(final_segments) == 0:
         raise RuntimeError(
             f"No subtitle segments were produced by the speech engine for language '{args.language}'."
         )
@@ -150,7 +272,7 @@ def main() -> int:
     output_dir = os.path.dirname(os.path.abspath(args.output))
     os.makedirs(output_dir, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:
-        for index, (start, end, text) in enumerate(segments, start=1):
+        for index, (start, end, text) in enumerate(final_segments, start=1):
             handle.write(f"{index}\n")
             handle.write(
                 f"{format_srt_timestamp(start)} --> {format_srt_timestamp(max(end, start + 0.2))}\n"
@@ -161,7 +283,7 @@ def main() -> int:
         words_output_dir = os.path.dirname(os.path.abspath(args.words_output))
         os.makedirs(words_output_dir, exist_ok=True)
         with open(args.words_output, "w", encoding="utf-8") as words_handle:
-            json.dump({"words": timed_words}, words_handle, ensure_ascii=False)
+            json.dump({"words": normalized_words}, words_handle, ensure_ascii=False)
 
     return 0
 
