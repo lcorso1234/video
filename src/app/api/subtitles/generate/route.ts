@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import {
   createRenderDraftFromStepOne,
   generateSubtitlesFromSourceVideo,
+  getSubtitleModelConfigError,
+  requiresConfiguredVoskModelForTranscription,
 } from "@/lib/video-editor";
 import { isLikelyVideoFile } from "@/lib/media-file";
 
@@ -25,20 +27,17 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!process.env.VOSK_MODEL_PATH?.trim()) {
-      return NextResponse.json(
-        {
-          error:
-            "Speech-to-text subtitles require VOSK_MODEL_PATH in the environment. Set it to a local Vosk model folder and restart the server.",
-        },
-        { status: 400 },
-      );
-    }
-
     const subtitleLanguage =
       typeof formData.get("subtitleLanguage") === "string"
         ? (formData.get("subtitleLanguage") as string)
         : "en";
+
+    if (requiresConfiguredVoskModelForTranscription()) {
+      return NextResponse.json(
+        { error: getSubtitleModelConfigError(subtitleLanguage) },
+        { status: 400 },
+      );
+    }
 
     const generated = await generateSubtitlesFromSourceVideo({
       sourceVideo,

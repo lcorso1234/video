@@ -174,6 +174,7 @@ const defaultSubtitleLanguage = "en";
 const defaultSubtitleFontSize = 76;
 const maxSubtitleFontSize = 120;
 const defaultSubtitleHighlightColor = "#E6FF00";
+const subtitleCacheVersion = "vosk-v2";
 const transcriptionAudioFilter =
   "highpass=f=80,lowpass=f=7600,acompressor=threshold=-18dB:ratio=2.6:attack=8:release=140,loudnorm=I=-16:TP=-1.5:LRA=11";
 const statusProgressMax = 100;
@@ -269,6 +270,114 @@ const googleFontToCategory: Record<string, keyof typeof fontCategoryCandidates> 
   "Fira Sans": "sans",
   "Inconsolata": "mono",
 };
+
+export function normalizeSubtitleLanguage(value?: string) {
+  const normalized = String(value || defaultSubtitleLanguage)
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-");
+  return normalized || defaultSubtitleLanguage;
+}
+
+function getSubtitleModelEnvKeys(language?: string) {
+  const parts = normalizeSubtitleLanguage(language)
+    .split("-")
+    .map((part) => part.replace(/[^a-z0-9]/gi, ""))
+    .filter(Boolean);
+  const keys: string[] = [];
+
+  if (parts.length > 1) {
+    keys.push(`VOSK_MODEL_PATH_${parts.join("_").toUpperCase()}`);
+  }
+  if (parts.length > 0) {
+    keys.push(`VOSK_MODEL_PATH_${parts[0].toUpperCase()}`);
+  }
+  keys.push("VOSK_MODEL_PATH");
+
+  return Array.from(new Set(keys));
+}
+
+export function resolveSubtitleModelPath(language?: string) {
+  for (const key of getSubtitleModelEnvKeys(language)) {
+    const value = process.env[key]?.trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+export function hasConfiguredSubtitleModel(language?: string) {
+  return Boolean(resolveSubtitleModelPath(language));
+}
+
+export function getSubtitleModelConfigError(language?: string) {
+  const keys = getSubtitleModelEnvKeys(language).map((key) => `\`${key}\``).join(", ");
+  return `Speech-to-text subtitles require a local Vosk model. Set ${keys} to a model folder and restart the server.`;
+}
+
+export function getConfiguredTranscriptionBackend() {
+  const backend = String(process.env.TRANSCRIPTION_BACKEND || "auto")
+    .trim()
+    .toLowerCase();
+  if (backend === "whisper" || backend === "vosk") {
+    return backend;
+  }
+  return "auto";
+}
+
+function getWhisperModelName() {
+  return String(process.env.WHISPER_MODEL || "small").trim() || "small";
+}
+
+function getWhisperComputeType() {
+  return String(process.env.WHISPER_COMPUTE_TYPE || "int8").trim() || "int8";
+}
+
+function getWhisperDevice() {
+  return String(process.env.WHISPER_DEVICE || "auto").trim() || "auto";
+}
+
+function isLikelyWhisperRuntimeError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("faster-whisper") ||
+    normalized.includes("no module named") ||
+    normalized.includes("ctranslate2") ||
+    normalized.includes("whisper transcription requires") ||
+    normalized.includes("localentrynotfounderror") ||
+    normalized.includes("huggingface_hub") ||
+    normalized.includes("snapshot folder") ||
+    normalized.includes("connecterror")
+  );
+}
+
+export function requiresConfiguredVoskModelForTranscription() {
+  return getConfiguredTranscriptionBackend() === "vosk";
+}
+
+function createSubtitleCacheKey(input: {
+  sourceVideo: RenderMediaSource;
+  language?: string;
+}) {
+  const subtitleLanguage = normalizeSubtitleLanguage(input.language);
+  const modelPath = resolveSubtitleModelPath(subtitleLanguage);
+  return createHash("sha1")
+    .update(
+      [
+        subtitleCacheVersion,
+        subtitleLanguage,
+        modelPath,
+        transcriptionAudioFilter,
+        input.sourceVideo.name,
+        input.sourceVideo.size,
+        input.sourceVideo.lastModified,
+      ].join("|"),
+    )
+    .digest("hex");
+}
 
 function assertBinaries() {
   getFfmpegBinaryPath();
@@ -1131,25 +1240,61 @@ async function transcribeAudioToSrt(params: {
   language: string;
   wordsOutputPath?: string;
 }) {
-  const modelPath = process.env.VOSK_MODEL_PATH?.trim();
-  if (!modelPath) {
-    throw new Error(
-      "Speech recognition requires VOSK_MODEL_PATH to point at a local Vosk model directory.",
-    );
-  }
-  const scriptPath = path.join(process.cwd(), "scripts", "vosk_transcribe.py");
-  await runCommand("python3", [
-    scriptPath,
+  const subtitleLanguage = normalizeSubtitleLanguage(params.language);
+  const backend = getConfiguredTranscriptionBackend();
+  const whisperScriptPath = path.join(process.cwd(), "scripts", "whisper_transcribe.py");
+  const whisperArgs = [
+    whisperScriptPath,
     "--input",
     params.audioPath,
     "--output",
     params.outputPath,
     "--model",
-    modelPath,
+    getWhisperModelName(),
     "--language",
-    params.language,
+    subtitleLanguage,
+    "--device",
+    getWhisperDevice(),
+    "--compute-type",
+    getWhisperComputeType(),
     ...(params.wordsOutputPath ? ["--words-output", params.wordsOutputPath] : []),
-  ]);
+  ];
+
+  const runVosk = async () => {
+    const modelPath = resolveSubtitleModelPath(subtitleLanguage);
+    if (!modelPath) {
+      throw new Error(getSubtitleModelConfigError(subtitleLanguage));
+    }
+
+    const voskScriptPath = path.join(process.cwd(), "scripts", "vosk_transcribe.py");
+    await runCommand("python3", [
+      voskScriptPath,
+      "--input",
+      params.audioPath,
+      "--output",
+      params.outputPath,
+      "--model",
+      modelPath,
+      "--language",
+      subtitleLanguage,
+      ...(params.wordsOutputPath ? ["--words-output", params.wordsOutputPath] : []),
+    ]);
+  };
+
+  if (backend === "whisper") {
+    await runCommand("python3", whisperArgs);
+  } else if (backend === "vosk") {
+    await runVosk();
+  } else {
+    try {
+      await runCommand("python3", whisperArgs);
+    } catch (error) {
+      if (!isLikelyWhisperRuntimeError(error) || !hasConfiguredSubtitleModel(subtitleLanguage)) {
+        throw error;
+      }
+      await runVosk();
+    }
+  }
 
   const generatedSrt = await readFile(params.outputPath, "utf8");
   if (!generatedSrt.trim()) {
@@ -1985,7 +2130,7 @@ export async function generateSubtitlesFromSourceVideo(input: {
     throw new Error("A main video file is required to generate subtitles.");
   }
 
-  const language = (input.subtitleLanguage || defaultSubtitleLanguage).trim() || defaultSubtitleLanguage;
+  const language = normalizeSubtitleLanguage(input.subtitleLanguage);
   const tempId = randomUUID();
   const tempDirectory = path.join(jobsRoot, "subtitle-only", tempId);
   const sourceExtension = inferVideoExtension(input.sourceVideo);
@@ -2011,6 +2156,8 @@ export async function generateSubtitlesFromSourceVideo(input: {
       "-i",
       sourceUploadPath,
       "-vn",
+      "-af",
+      transcriptionAudioFilter,
       "-ac",
       "1",
       "-ar",
@@ -2136,13 +2283,14 @@ export async function renderVideo(
 
     reportProgress("running", 10, "Uploaded source and optional assets.");
     const shouldGenerateTrailerIntroOutro = input.generateTrailerIntroOutro ?? true;
+    const subtitleLanguage = normalizeSubtitleLanguage(input.subtitleLanguage);
     const subtitlesEnabled = input.subtitlesEnabled ?? true;
     const burnSubtitles = input.burnSubtitles ?? true;
     const enableRetroLook = input.enableRetroLook ?? true;
     const canFastPathSubtitles =
       !subtitlesEnabled ||
       Boolean(subtitleUploadPath) ||
-      Boolean(process.env.VOSK_MODEL_PATH?.trim());
+      hasConfiguredSubtitleModel(subtitleLanguage);
     const wantsLowerThird =
       Boolean(input.lowerThirdTitle?.trim()) || Boolean(input.lowerThirdSubtitle?.trim());
     const useFastPassThrough =
@@ -2184,17 +2332,13 @@ export async function renderVideo(
           if (subtitleUploadPath) {
             subtitleRaw = await readFile(subtitleUploadPath, "utf8");
           } else {
-            const subtitleLanguage =
-              (input.subtitleLanguage || defaultSubtitleLanguage).trim() ||
-              defaultSubtitleLanguage;
             const subtitleAudioPath = path.join(workingDirectory, "subtitle-source.wav");
             const generatedSubtitlePath = path.join(workingDirectory, "auto-subtitles.srt");
             await ensureDirectory(subtitleCacheRoot);
-            const subtitleCacheKey = createHash("sha1")
-              .update(
-                `${input.sourceVideo.name}|${input.sourceVideo.size}|${input.sourceVideo.lastModified}|${subtitleLanguage}`,
-              )
-              .digest("hex");
+            const subtitleCacheKey = createSubtitleCacheKey({
+              sourceVideo: input.sourceVideo,
+              language: subtitleLanguage,
+            });
             const cachedSubtitlePath = path.join(subtitleCacheRoot, `${subtitleCacheKey}.srt`);
 
             try {
@@ -2301,9 +2445,6 @@ export async function renderVideo(
         : [];
 
     if (subtitlesEnabled) {
-      const subtitleLanguage =
-        (input.subtitleLanguage || defaultSubtitleLanguage).trim() ||
-        defaultSubtitleLanguage;
       const subtitleAudioPath = path.join(workingDirectory, "subtitle-source.wav");
       const generatedSubtitlePath = path.join(workingDirectory, "auto-subtitles.srt");
       const generatedWordsPath = path.join(workingDirectory, "auto-subtitles.words.json");
@@ -2321,11 +2462,10 @@ export async function renderVideo(
         reportProgress("running", 24, "Loaded uploaded subtitle file.");
       } else {
         await ensureDirectory(subtitleCacheRoot);
-        const subtitleCacheKey = createHash("sha1")
-          .update(
-            `${input.sourceVideo.name}|${input.sourceVideo.size}|${input.sourceVideo.lastModified}|${subtitleLanguage}`,
-          )
-          .digest("hex");
+        const subtitleCacheKey = createSubtitleCacheKey({
+          sourceVideo: input.sourceVideo,
+          language: subtitleLanguage,
+        });
         const cachedSubtitlePath = path.join(subtitleCacheRoot, `${subtitleCacheKey}.srt`);
         let rawSubtitle = "";
 

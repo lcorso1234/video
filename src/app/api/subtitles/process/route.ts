@@ -3,7 +3,12 @@ import path from "node:path";
 import { mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { NextResponse } from "next/server";
-import { renderVideo } from "@/lib/video-editor";
+import {
+  getSubtitleModelConfigError,
+  renderVideo,
+  requiresConfiguredVoskModelForTranscription,
+  resolveSubtitleModelPath,
+} from "@/lib/video-editor";
 import { inferVideoExtension, inferVideoMimeType, isLikelyVideoFile } from "@/lib/media-file";
 
 export const runtime = "nodejs";
@@ -274,7 +279,7 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
       srtPath,
       wordsPath,
       language: input.language,
-      modelPath: process.env.VOSK_MODEL_PATH,
+      modelPath: resolveSubtitleModelPath(input.language),
     });
 
     await writeJobStatus(jobId, {
@@ -337,12 +342,10 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!process.env.VOSK_MODEL_PATH?.trim()) {
+    const subtitleLanguage = getText(formData.get("subtitleLanguage"), "en");
+    if (requiresConfiguredVoskModelForTranscription()) {
       return NextResponse.json(
-        {
-          error:
-            "Speech-to-text subtitles require VOSK_MODEL_PATH in the environment. Set it to a local Vosk model folder and restart the server.",
-        },
+        { error: getSubtitleModelConfigError(subtitleLanguage) },
         { status: 400 },
       );
     }
@@ -364,7 +367,7 @@ export async function POST(request: Request) {
       sourceVideo: clonedSourceVideo,
       logoFile: clonedLogoFile,
       renderSpeedMode: getRenderSpeedMode(formData.get("renderSpeedMode")),
-      language: getText(formData.get("subtitleLanguage"), "en"),
+      language: subtitleLanguage,
       fontChoice: getText(formData.get("subtitleFontChoice"), "Poppins"),
       fontSize: getNumber(formData.get("subtitleFontSize"), 76),
       subtitleTextColor: getText(formData.get("subtitleTextColor"), "#ffffff"),

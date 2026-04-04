@@ -32,14 +32,6 @@ type RenderStartPayload = (RenderResponse &
     error?: string;
   }) | { error?: string; message?: string };
 
-type SubtitleGenerateResponse = {
-  filename?: string;
-  content?: string;
-  draftId?: string;
-  error?: string;
-  message?: string;
-};
-
 const INTRO_OUTRO_BACKGROUND = "#6f7b86";
 const DEFAULT_LOWER_THIRD_COMPANY = "Company Name";
 const DEFAULT_LOWER_THIRD_PERSON = "Name of Person";
@@ -244,47 +236,147 @@ function formatBytes(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const TIMECODE_PATTERN = /^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}/;
-
-function extractTranscriptFromSrt(content: string) {
-  return content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => Boolean(line))
-    .filter((line) => !/^\d+$/.test(line))
-    .filter((line) => !TIMECODE_PATTERN.test(line))
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function clipText(value: string, maxLength: number) {
-  if (value.length <= maxLength) {
-    return value;
+function ensureMp4Filename(value: string) {
+  const trimmed = value.trim().replace(/[\\/:*?"<>|]+/g, "-");
+  if (!trimmed) {
+    return "final-video.mp4";
   }
-  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+  return trimmed.toLowerCase().endsWith(".mp4") ? trimmed : `${trimmed}.mp4`;
 }
 
-function buildAutoCreditsFromTranscript(transcript: string) {
-  const cleaned = transcript.replace(/\s+/g, " ").trim();
-  const sentences = cleaned
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence.length > 0);
-  const fallbackSummary = cleaned || "Video summary unavailable.";
-  const summarySentence =
-    sentences.find((sentence) => sentence.split(/\s+/).length >= 5) || sentences[0] || fallbackSummary;
-  const keyPointSentence =
-    sentences.find((sentence) => sentence !== summarySentence && sentence.split(/\s+/).length >= 5) ||
-    sentences[1] ||
-    "";
+function formatMediaTime(value: number) {
+  if (!Number.isFinite(value) || value < 0) {
+    return "0:00";
+  }
+
+  const totalSeconds = Math.floor(value);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatCreditsDate(value: Date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).formatToParts(value);
+  const month = parts.find((part) => part.type === "month")?.value || "Mar";
+  const day = parts.find((part) => part.type === "day")?.value || "18";
+  const year = parts.find((part) => part.type === "year")?.value || "2026";
+  return `${month}, ${day} ${year}`;
+}
+
+function formatCreditsTime(value: Date) {
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(value);
+}
+
+function buildCreditsTemplate(value = new Date()) {
+  return [
+    "Executive Producer - Jung International",
+    "Director - Larry Corso",
+    'Invention Name - "Inverted Backend"',
+    `Date - ${formatCreditsDate(value)}`,
+    `Time: ${formatCreditsTime(value)}`,
+    "",
+    "We appreciate your consideration!",
+  ].join("\n");
+}
+
+function getCreditsValue(credits: string, label: string) {
+  const prefix = `${label} -`;
+  const line = credits
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith(prefix));
+  if (!line) {
+    return "";
+  }
+  return line.slice(prefix.length).trim();
+}
+
+function normalizeSentence(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  return /[.!?]$/.test(normalized) ? normalized : `${normalized}.`;
+}
+
+function buildVideoSummarySeed(input: {
+  credits: string;
+  lowerThirdCompany: string;
+  lowerThirdPerson: string;
+}) {
+  const inventionName = getCreditsValue(input.credits, "Invention Name").replace(/^"+|"+$/g, "");
+  const director = getCreditsValue(input.credits, "Director");
+  const presenter = getCreditsValue(input.credits, "Executive Producer");
+  const speaker = input.lowerThirdPerson.trim() || director || "Larry Corso";
+  const company = input.lowerThirdCompany.trim() || presenter || "Jung International";
+  const invention = inventionName || "Inverted Backend";
+
+  return `${speaker} from ${company} introduces ${invention}, a concept focused on simplifying the user experience and removing setup friction.`;
+}
+
+function buildYouTubeSummary(input: {
+  credits: string;
+  lowerThirdCompany: string;
+  lowerThirdPerson: string;
+  videoSummary: string;
+}) {
+  const sourceSummary =
+    normalizeSentence(input.videoSummary) ||
+    buildVideoSummarySeed({
+      credits: input.credits,
+      lowerThirdCompany: input.lowerThirdCompany,
+      lowerThirdPerson: input.lowerThirdPerson,
+    });
+
+  return `${sourceSummary} This video highlights entrepreneurship, startup innovation, product thinking, and practical founder-led execution.`;
+}
+
+function buildYouTubeDescription(input: {
+  credits: string;
+  lowerThirdCompany: string;
+  lowerThirdPerson: string;
+  videoSummary: string;
+}) {
+  const inventionName = getCreditsValue(input.credits, "Invention Name").replace(/^"+|"+$/g, "");
+  const director = getCreditsValue(input.credits, "Director");
+  const presenter = getCreditsValue(input.credits, "Executive Producer");
+  const speaker = input.lowerThirdPerson.trim() || director || "Larry Corso";
+  const company = input.lowerThirdCompany.trim() || presenter || "Jung International";
+  const invention = inventionName || "Inverted Backend";
+  const sourceSummary =
+    normalizeSentence(input.videoSummary) ||
+    buildVideoSummarySeed({
+      credits: input.credits,
+      lowerThirdCompany: input.lowerThirdCompany,
+      lowerThirdPerson: input.lowerThirdPerson,
+    });
 
   return [
-    `Summary - ${clipText(summarySentence, 92)}`,
-    keyPointSentence
-      ? `Key Point - ${clipText(keyPointSentence, 92)}`
-      : "Key Point - Main points covered in this video.",
-    "Appreciate your time.",
+    sourceSummary,
+    "",
+    `Presented by ${company}, this video is positioned for audiences interested in entrepreneur stories, entrepreneurship, startup ideas, business innovation, product design, and founder-led execution.`,
+    "",
+    "Keywords:",
+    "Entrepreneur, entrepreneurship, startup, founder, innovation, product development, business idea, software invention, tech entrepreneur",
+    "",
+    "Callouts:",
+    `${speaker}`,
+    `${company}`,
+    `${invention}`,
   ].join("\n");
 }
 
@@ -295,6 +387,7 @@ function buildRenderFormData(input: {
   videoFormat: "short" | "wide";
   credits: string;
   subtitleHighlightColor: string;
+  subtitlesEnabled: boolean;
   lowerThirdCompany: string;
   lowerThirdPerson: string;
 }) {
@@ -328,6 +421,7 @@ function buildRenderFormData(input: {
   formData.append("subtitleFontSize", "76");
   formData.append("subtitleTextColor", "#ffffff");
   formData.append("subtitleHighlightColor", input.subtitleHighlightColor);
+  formData.append("subtitlesEnabled", String(input.subtitlesEnabled));
   formData.append("renderSpeedMode", "turbo");
   formData.append("subtitleLanguage", "en");
   return formData;
@@ -361,11 +455,41 @@ export default function Home() {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [trailerMusicFile, setTrailerMusicFile] = useState<File | null>(null);
   const [videoFormat, setVideoFormat] = useState<"short" | "wide">("wide");
-  const [credits, setCredits] = useState(
-    "Executive Producer - Name\nDirector - Name\nEditor - Name\nPresented by - Organization",
-  );
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+  const [credits, setCredits] = useState(() => buildCreditsTemplate());
   const [lowerThirdCompany, setLowerThirdCompany] = useState(DEFAULT_LOWER_THIRD_COMPANY);
   const [lowerThirdPerson, setLowerThirdPerson] = useState(DEFAULT_LOWER_THIRD_PERSON);
+  const [videoSummaryInput, setVideoSummaryInput] = useState(() =>
+    buildVideoSummarySeed({
+      credits: buildCreditsTemplate(),
+      lowerThirdCompany: DEFAULT_LOWER_THIRD_COMPANY,
+      lowerThirdPerson: DEFAULT_LOWER_THIRD_PERSON,
+    }),
+  );
+  const [youtubeSummary, setYoutubeSummary] = useState(() =>
+    buildYouTubeSummary({
+      credits: buildCreditsTemplate(),
+      lowerThirdCompany: DEFAULT_LOWER_THIRD_COMPANY,
+      lowerThirdPerson: DEFAULT_LOWER_THIRD_PERSON,
+      videoSummary: buildVideoSummarySeed({
+        credits: buildCreditsTemplate(),
+        lowerThirdCompany: DEFAULT_LOWER_THIRD_COMPANY,
+        lowerThirdPerson: DEFAULT_LOWER_THIRD_PERSON,
+      }),
+    }),
+  );
+  const [youtubeDescription, setYoutubeDescription] = useState(() =>
+    buildYouTubeDescription({
+      credits: buildCreditsTemplate(),
+      lowerThirdCompany: DEFAULT_LOWER_THIRD_COMPANY,
+      lowerThirdPerson: DEFAULT_LOWER_THIRD_PERSON,
+      videoSummary: buildVideoSummarySeed({
+        credits: buildCreditsTemplate(),
+        lowerThirdCompany: DEFAULT_LOWER_THIRD_COMPANY,
+        lowerThirdPerson: DEFAULT_LOWER_THIRD_PERSON,
+      }),
+    }),
+  );
   const [isAutoSummarizing, setIsAutoSummarizing] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -376,6 +500,12 @@ export default function Home() {
   const [activeRenderJobId, setActiveRenderJobId] = useState<string | null>(null);
   const [renderStatus, setRenderStatus] = useState<RenderStatusResponse | null>(null);
   const [result, setResult] = useState<RenderResponse | null>(null);
+  const [downloadFilename, setDownloadFilename] = useState("final-video.mp4");
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [isPreviewMuted, setIsPreviewMuted] = useState(false);
+  const [previewDuration, setPreviewDuration] = useState(0);
+  const [previewCurrentTime, setPreviewCurrentTime] = useState(0);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const statusPollerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -521,45 +651,131 @@ export default function Home() {
     statusPollerRef.current = setInterval(pollStatus, 1500);
   }, [activeRenderJobId, isSubmitting]);
 
-  async function handleAutoSummary() {
-    if (!videoFile) {
-      setErrorMessage("Upload a video in phase 2 before generating an auto summary.");
-      setActivePhase(2);
+  useEffect(() => {
+    setDownloadFilename(ensureMp4Filename(result?.filename || "final-video.mp4"));
+    setIsPreviewPlaying(false);
+    setPreviewCurrentTime(0);
+    setPreviewDuration(0);
+  }, [result?.jobId, result?.filename]);
+
+  useEffect(() => {
+    if (!result?.jobId) {
       return;
     }
 
+    setYoutubeSummary(
+      buildYouTubeSummary({
+        credits,
+        lowerThirdCompany,
+        lowerThirdPerson,
+        videoSummary: videoSummaryInput,
+      }),
+    );
+    setYoutubeDescription(
+      buildYouTubeDescription({
+        credits,
+        lowerThirdCompany,
+        lowerThirdPerson,
+        videoSummary: videoSummaryInput,
+      }),
+    );
+  }, [result?.jobId, credits, lowerThirdCompany, lowerThirdPerson, videoSummaryInput]);
+
+  async function handleAutoSummary() {
     setIsAutoSummarizing(true);
     setErrorMessage("");
-    setStatusMessage("Analyzing video audio for auto summary...");
+    setStatusMessage("Updating credits with the current date and time...");
 
     try {
-      const formData = new FormData();
-      formData.append("video", videoFile);
-      formData.append("subtitleLanguage", "en");
-
-      const response = await fetch("/api/subtitles/generate", {
-        method: "POST",
-        body: formData,
-      });
-      const payload = (await response.json()) as SubtitleGenerateResponse;
-      if (!response.ok) {
-        throw new Error(payload.error || payload.message || "Unable to auto-generate summary.");
-      }
-
-      const transcript = extractTranscriptFromSrt(payload.content || "");
-      if (!transcript) {
-        throw new Error("No transcript text was produced for this video.");
-      }
-
-      const generatedCredits = buildAutoCreditsFromTranscript(transcript);
-      setCredits(generatedCredits);
-      setStatusMessage("Auto summary ready. Review the lines in credits before producing.");
+      setCredits(buildCreditsTemplate(new Date()));
+      setStatusMessage("Credits updated with the current date and time.");
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Unable to auto-generate summary.");
-      setStatusMessage("Auto summary failed.");
+      setErrorMessage(error instanceof Error ? error.message : "Unable to update credits.");
+      setStatusMessage("Credits update failed.");
     } finally {
       setIsAutoSummarizing(false);
     }
+  }
+
+  function handleSubtitlesToggle() {
+    setSubtitlesEnabled((current) => {
+      const next = !current;
+      setResult(null);
+      setRenderStatus(null);
+      setErrorMessage("");
+      setStatusMessage(
+        next
+          ? "Subtitles enabled for the next render."
+          : "Subtitles disabled for the next render.",
+      );
+      return next;
+    });
+  }
+
+  function refreshYoutubeCopy() {
+    setYoutubeSummary(
+      buildYouTubeSummary({
+        credits,
+        lowerThirdCompany,
+        lowerThirdPerson,
+        videoSummary: videoSummaryInput,
+      }),
+    );
+    setYoutubeDescription(
+      buildYouTubeDescription({
+        credits,
+        lowerThirdCompany,
+        lowerThirdPerson,
+        videoSummary: videoSummaryInput,
+      }),
+    );
+    setStatusMessage("YouTube summary and description refreshed.");
+  }
+
+  async function handleCopyText(value: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setErrorMessage("");
+      setStatusMessage(`${label} copied to clipboard.`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : `Unable to copy ${label.toLowerCase()}.`);
+    }
+  }
+
+  async function handlePreviewPlayPause() {
+    const video = previewVideoRef.current;
+    if (!video) {
+      return;
+    }
+
+    if (video.paused) {
+      await video.play();
+      setIsPreviewPlaying(true);
+      return;
+    }
+
+    video.pause();
+    setIsPreviewPlaying(false);
+  }
+
+  function handlePreviewSeek(nextValue: number) {
+    const video = previewVideoRef.current;
+    if (!video) {
+      return;
+    }
+
+    video.currentTime = nextValue;
+    setPreviewCurrentTime(nextValue);
+  }
+
+  function handlePreviewMuteToggle() {
+    const video = previewVideoRef.current;
+    if (!video) {
+      return;
+    }
+
+    video.muted = !video.muted;
+    setIsPreviewMuted(video.muted);
   }
 
   async function handleRender(event: FormEvent<HTMLFormElement>) {
@@ -607,6 +823,7 @@ export default function Home() {
         videoFormat,
         credits,
         subtitleHighlightColor,
+        subtitlesEnabled,
         lowerThirdCompany,
         lowerThirdPerson,
       });
@@ -835,7 +1052,7 @@ export default function Home() {
                   setRenderStatus(null);
                   if (nextFile) {
                     setErrorMessage("");
-                    setStatusMessage("Phase 2 ready. Continue to phase 3 for subtitles and render.");
+                    setStatusMessage("Phase 2 ready. Continue to phase 3 for final options and render.");
                   }
                 }}
                 className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#9bff2e] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-[#0d1608] file:shadow-[0_0_14px_rgba(155,255,46,0.45)] disabled:opacity-55"
@@ -891,7 +1108,7 @@ export default function Home() {
                   }
                   setErrorMessage("");
                   setActivePhase(3);
-                  setStatusMessage("Phase 3 unlocked. Add subtitles and produce.");
+                  setStatusMessage("Phase 3 unlocked. Configure final options and produce.");
                 }}
                 className="inline-flex h-11 items-center justify-center rounded-full bg-[#9bff2e] px-5 text-sm font-semibold text-[#0d1608] shadow-[0_0_18px_rgba(155,255,46,0.4)] transition hover:bg-[#b9ff63] hover:shadow-[0_0_22px_rgba(155,255,46,0.5)] disabled:cursor-not-allowed disabled:opacity-55"
               >
@@ -906,12 +1123,45 @@ export default function Home() {
             }`}
           >
             <p className="text-xs uppercase tracking-[0.2em] text-[#a4ff73]">Phase 3</p>
-            <h2 className="mt-1 text-xl font-semibold">Add Subtitles & Produce</h2>
+            <h2 className="mt-1 text-xl font-semibold">Finalize & Produce</h2>
 
             <div className="mt-4 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
-              <p className="text-sm text-[#d6dde2]">Subtitles are auto-generated from video audio.</p>
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-semibold text-[#d6dde2]">Burn subtitles</p>
+                  <p className="mt-1 text-xs text-[#a8b4be]">
+                    {subtitlesEnabled
+                      ? "On for the next render. Speech will be transcribed and burned into the video."
+                      : "Off for the next render. The output video will not include subtitles."}
+                  </p>
+                </div>
+                <label
+                  className={`inline-flex items-center gap-3 rounded-full border px-3 py-2 transition ${
+                    subtitlesEnabled
+                      ? "border-[#9bff2e]/65 bg-[#9bff2e]/12"
+                      : "border-[#7dff35]/35 bg-[#152019]/45"
+                  } ${!phase3Unlocked || isSubmitting ? "cursor-not-allowed opacity-55" : "cursor-pointer"}`}
+                >
+                  <span className="text-sm font-semibold text-[#e6edf1]">
+                    {subtitlesEnabled ? "On" : "Off"}
+                  </span>
+                  <span className="relative inline-flex h-7 w-12 items-center">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={subtitlesEnabled}
+                      disabled={!phase3Unlocked || isSubmitting}
+                      onChange={handleSubtitlesToggle}
+                      className="peer sr-only"
+                      aria-label="Toggle subtitles"
+                    />
+                    <span className="absolute inset-0 rounded-full bg-[#304036] transition peer-checked:bg-[#9bff2e]" />
+                    <span className="absolute left-1 h-5 w-5 rounded-full bg-white transition peer-checked:translate-x-5" />
+                  </span>
+                </label>
+              </div>
               <p className="mt-1 text-xs text-[#a8b4be]">
-                Highlight color is locked to your logo palette:
+                Accent color is locked to your logo palette:
                 <span className="font-semibold text-[#e6edf1]"> {subtitleHighlightColor || "not selected"}</span>.
               </p>
             </div>
@@ -951,7 +1201,7 @@ export default function Home() {
                   onClick={() => {
                     void handleAutoSummary();
                   }}
-                  disabled={!videoFile || isAutoSummarizing || isSubmitting}
+                  disabled={!phase3Unlocked || isAutoSummarizing || isSubmitting}
                   className="inline-flex h-9 items-center justify-center rounded-full border border-[#7dff35]/55 px-4 text-xs font-semibold text-[#d8ffbe] transition hover:bg-[#9bff2e]/15 disabled:cursor-not-allowed disabled:opacity-55"
                 >
                   {isAutoSummarizing ? "Summarizing..." : "Auto Summary"}
@@ -965,15 +1215,16 @@ export default function Home() {
                 className="rounded-xl border border-[#73ff3a]/30 bg-[#203027] px-3 py-2.5 text-[#e6edf1]"
               />
               <span className="text-xs text-[#9eabb6]">
-                These lines will appear below the logo in the outro. Auto Summary uses the video transcript.
+                These lines will appear below the logo in the outro. Auto Summary refreshes the current date and time.
               </span>
             </label>
 
             <div className="mt-4 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
               <p className="text-sm text-[#d6dde2]">Lower Third</p>
               <p className="mt-1 text-xs text-[#a8b4be]">
-                Uses your selected logo color, appears 3 seconds after intro, and subtitles resume
-                after the lower-third slides in.
+                {subtitlesEnabled
+                  ? "Uses your selected logo color, appears 3 seconds after intro, and subtitles resume after the lower-third slides in."
+                  : "Uses your selected logo color and appears 3 seconds after the intro."}
               </p>
               <div className="mt-3 grid gap-3 md:grid-cols-2">
                 <label className="grid gap-2">
@@ -1005,6 +1256,30 @@ export default function Home() {
                 Cloud upload and YouTube sync are disabled. Rendering stays local on this machine.
               </p>
             </div>
+
+            <label className="mt-4 grid gap-2 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm text-[#d6dde2]">Video Summary</span>
+                <button
+                  type="button"
+                  onClick={refreshYoutubeCopy}
+                  disabled={!phase3Unlocked || isSubmitting}
+                  className="inline-flex h-9 items-center justify-center rounded-full border border-[#7dff35]/55 px-4 text-xs font-semibold text-[#d8ffbe] transition hover:bg-[#9bff2e]/15 disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  Refresh Copy
+                </button>
+              </div>
+              <textarea
+                value={videoSummaryInput}
+                onChange={(event) => setVideoSummaryInput(event.target.value)}
+                rows={4}
+                placeholder="Write a short summary of what happens in the video."
+                className="rounded-xl border border-[#73ff3a]/30 bg-[#203027] px-3 py-2.5 text-[#e6edf1]"
+              />
+              <span className="text-xs text-[#9eabb6]">
+                This summary is used to generate the YouTube summary and description after the video finishes rendering.
+              </span>
+            </label>
 
             <div className="mt-4 flex flex-wrap gap-3">
               <button
@@ -1063,28 +1338,141 @@ export default function Home() {
             <div className="mt-5 space-y-4 rounded-2xl border border-[#92ff58]/45 bg-[#9bff2e]/10 p-4">
               <div>
                 <p className="text-sm text-[#d5dde3]">Render complete</p>
-                <p className="text-lg font-semibold text-[#e6edf1]">{result.filename}</p>
+                <label className="mt-2 grid max-w-xl gap-2">
+                  <span className="text-xs uppercase tracking-[0.14em] text-[#b8c3cb]">
+                    Output Filename
+                  </span>
+                  <input
+                    type="text"
+                    value={downloadFilename}
+                    onChange={(event) => setDownloadFilename(event.target.value)}
+                    onBlur={() => setDownloadFilename((current) => ensureMp4Filename(current))}
+                    className="rounded-xl border border-[#73ff3a]/30 bg-[#203027] px-3 py-2.5 text-base font-semibold text-[#e6edf1]"
+                  />
+                </label>
                 <p className="text-xs text-[#b8c3cb]">Size: {formatBytes(result.sizeInBytes)}</p>
               </div>
 
               {result.previewUrl ? (
-                <div className="overflow-hidden rounded-2xl border border-[#73ff3a]/30 bg-[#203027]/78">
+                <div className="space-y-3 overflow-hidden rounded-2xl border border-[#73ff3a]/30 bg-[#203027]/78 p-3">
                   <video
                     key={result.jobId}
-                    controls
+                    ref={previewVideoRef}
                     preload="metadata"
-                    className="h-auto w-full"
+                    className="h-auto w-full rounded-xl bg-black"
                     src={result.previewUrl}
+                    onLoadedMetadata={(event) => {
+                      setPreviewDuration(event.currentTarget.duration || 0);
+                      setPreviewCurrentTime(event.currentTarget.currentTime || 0);
+                      setIsPreviewMuted(event.currentTarget.muted);
+                    }}
+                    onTimeUpdate={(event) => {
+                      setPreviewCurrentTime(event.currentTarget.currentTime || 0);
+                    }}
+                    onPlay={() => setIsPreviewPlaying(true)}
+                    onPause={() => setIsPreviewPlaying(false)}
+                    onEnded={() => setIsPreviewPlaying(false)}
                   />
+                  <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[#73ff3a]/20 bg-[#152019]/70 px-3 py-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handlePreviewPlayPause();
+                      }}
+                      className="inline-flex h-10 min-w-24 items-center justify-center rounded-full bg-[#9bff2e] px-4 text-sm font-semibold text-[#0d1608] transition hover:bg-[#b9ff63]"
+                    >
+                      {isPreviewPlaying ? "Pause" : "Play"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePreviewMuteToggle}
+                      className="inline-flex h-10 min-w-20 items-center justify-center rounded-full border border-[#7dff35]/45 px-4 text-sm font-semibold text-[#d5ffc2] transition hover:bg-[#9bff2e]/15"
+                    >
+                      {isPreviewMuted ? "Unmute" : "Mute"}
+                    </button>
+                    <div className="min-w-24 text-sm font-medium text-[#d5dde3]">
+                      {formatMediaTime(previewCurrentTime)} / {formatMediaTime(previewDuration)}
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={previewDuration || 0}
+                      step={0.1}
+                      value={Math.min(previewCurrentTime, previewDuration || 0)}
+                      onChange={(event) => handlePreviewSeek(Number(event.target.value))}
+                      className="h-2 min-w-[220px] flex-1 accent-[#9bff2e]"
+                    />
+                  </div>
                 </div>
               ) : null}
 
               <a
                 href={result.downloadUrl}
+                download={ensureMp4Filename(downloadFilename)}
                 className="inline-flex h-11 items-center justify-center rounded-full bg-[#9bff2e] px-5 text-sm font-semibold text-[#0d1608] shadow-[0_0_18px_rgba(155,255,46,0.4)] transition hover:bg-[#b9ff63] hover:shadow-[0_0_22px_rgba(155,255,46,0.5)]"
               >
                 Download Final Video
               </a>
+
+              <div className="rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm text-[#d6dde2]">YouTube Copy</p>
+                    <p className="mt-1 text-xs text-[#a8b4be]">
+                      Editable summary and description generated from your video summary.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={refreshYoutubeCopy}
+                    className="inline-flex h-9 items-center justify-center rounded-full border border-[#7dff35]/55 px-4 text-xs font-semibold text-[#d8ffbe] transition hover:bg-[#9bff2e]/15"
+                  >
+                    Refresh Copy
+                  </button>
+                </div>
+
+                <label className="mt-4 grid gap-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-[#d6dde2]">Summary</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleCopyText(youtubeSummary, "Summary");
+                      }}
+                      className="inline-flex h-8 items-center justify-center rounded-full border border-[#7dff35]/45 px-3 text-xs font-semibold text-[#d5ffc2] transition hover:bg-[#9bff2e]/15"
+                    >
+                      Copy Summary
+                    </button>
+                  </div>
+                  <textarea
+                    value={youtubeSummary}
+                    onChange={(event) => setYoutubeSummary(event.target.value)}
+                    rows={3}
+                    className="rounded-xl border border-[#73ff3a]/30 bg-[#203027] px-3 py-2.5 text-[#e6edf1]"
+                  />
+                </label>
+
+                <label className="mt-4 grid gap-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-[#d6dde2]">Description</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleCopyText(youtubeDescription, "Description");
+                      }}
+                      className="inline-flex h-8 items-center justify-center rounded-full border border-[#7dff35]/45 px-3 text-xs font-semibold text-[#d5ffc2] transition hover:bg-[#9bff2e]/15"
+                    >
+                      Copy Description
+                    </button>
+                  </div>
+                  <textarea
+                    value={youtubeDescription}
+                    onChange={(event) => setYoutubeDescription(event.target.value)}
+                    rows={8}
+                    className="rounded-xl border border-[#73ff3a]/30 bg-[#203027] px-3 py-2.5 text-[#e6edf1]"
+                  />
+                </label>
+              </div>
             </div>
           ) : null}
         </section>

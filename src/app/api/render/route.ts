@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import {
+  getSubtitleModelConfigError,
+  requiresConfiguredVoskModelForTranscription,
   renderVideo,
   resolveRenderInputFromDraft,
   type RenderMediaSource,
@@ -34,6 +36,7 @@ type PipelineJobInput = {
   subtitleFontSize: number;
   subtitleTextColor: string;
   subtitleHighlightColor: string;
+  subtitlesEnabled: boolean;
   generateTrailerIntroOutro: boolean;
   trailerTitle: string;
   trailerSubtitle: string;
@@ -226,8 +229,8 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
         subtitleFontSize: input.subtitleFontSize,
         subtitleTextColor: input.subtitleTextColor,
         subtitleHighlightColor: input.subtitleHighlightColor,
-        subtitlesEnabled: true,
-        burnSubtitles: true,
+        subtitlesEnabled: input.subtitlesEnabled,
+        burnSubtitles: input.subtitlesEnabled,
         enableRetroLook: !isLightning,
         subtitleLanguage: input.language,
       },
@@ -268,11 +271,15 @@ export async function POST(request: Request) {
       return errorResponse("Video must be a supported format (.mp4, .mov, .m4v, .webm, .mkv, .avi).");
     }
 
+    const subtitlesEnabled = getBoolean(formData.get("subtitlesEnabled"), true);
+    const subtitleLanguage = getText(formData.get("subtitleLanguage"), "en");
     const rawSubtitle = getOptionalFile(formData.get("subtitleFile")) || draftInput?.subtitleFile || null;
-    if (!rawSubtitle && !process.env.VOSK_MODEL_PATH?.trim()) {
-      return errorResponse(
-        "Speech-to-text subtitles require VOSK_MODEL_PATH in the environment. Set it to a local Vosk model folder and restart the server.",
-      );
+    if (
+      subtitlesEnabled &&
+      !rawSubtitle &&
+      requiresConfiguredVoskModelForTranscription()
+    ) {
+      return errorResponse(getSubtitleModelConfigError(subtitleLanguage));
     }
 
     const normalizedLogo = await normalizeLogoFile(
@@ -293,7 +300,7 @@ export async function POST(request: Request) {
       videoFormat: getVideoFormat(formData.get("videoFormat")),
       renderSpeedMode,
       lightningMode: renderSpeedMode === "turbo",
-      language: getText(formData.get("subtitleLanguage"), "en"),
+      language: subtitleLanguage,
       subtitleFontChoice: getText(formData.get("subtitleFontChoice"), "Poppins"),
       subtitleFontSize: getNumber(formData.get("subtitleFontSize"), DEFAULT_SUBTITLE_FONT_SIZE),
       subtitleTextColor: getText(
@@ -304,6 +311,7 @@ export async function POST(request: Request) {
         formData.get("subtitleHighlightColor"),
         DEFAULT_SUBTITLE_HIGHLIGHT_COLOR,
       ),
+      subtitlesEnabled,
       generateTrailerIntroOutro: getBoolean(formData.get("generateTrailerIntroOutro"), true),
       trailerTitle: getText(formData.get("trailerTitle"), "COMING UP NEXT"),
       trailerSubtitle: getText(formData.get("trailerSubtitle"), "A cinematic trailer"),

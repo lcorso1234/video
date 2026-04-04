@@ -3,7 +3,7 @@
 const path = require("node:path");
 const { app, BrowserWindow, shell } = require("electron");
 
-const appUrl = process.env.ELECTRON_START_URL || "http://localhost:3004";
+const appUrl = process.env.ELECTRON_START_URL || "http://localhost:3006";
 const isDev = !app.isPackaged;
 
 function createWindow() {

@@ -98,25 +98,32 @@ npm run test:auto-subtitles -- ./path/to/logo.svg --host http://127.0.0.1:3004 -
 Rendering now includes a speech-to-text pipeline:
 
 1. Extract audio from the rendered timeline.
-2. Run speech recognition with a local Vosk engine.
+2. Run speech recognition with Whisper when available, or fall back to a local Vosk engine.
 3. Generate an `.srt` subtitle file.
 4. Keep subtitles as a separate downloadable file.
 
-If you upload an `.srt` file in the UI, that file is used instead of auto-transcription.
+Subtitles can also be disabled entirely in the Phase 3 UI. If you upload an `.srt` file in the UI, that file is used instead of auto-transcription.
 
 Setup:
 
 ```bash
 python3 -m pip install --user vosk
+python3 -m pip install faster-whisper
 ```
 
-Download a Vosk model (for example from `alphacephei.com/vosk/models`) and set this in `.env.local`:
+Recommended `.env.local` settings:
 
 ```bash
+TRANSCRIPTION_BACKEND=auto
+WHISPER_MODEL=small
+WHISPER_DEVICE=auto
+WHISPER_COMPUTE_TYPE=int8
 VOSK_MODEL_PATH=/absolute/path/to/vosk-model-small-en-us
 ```
 
-If you upload an `.srt` file in the UI, transcription is skipped and `VOSK_MODEL_PATH` is not required for that render.
+`auto` prefers Whisper for better accuracy and falls back to Vosk if Whisper is unavailable. If you want to force one backend, set `TRANSCRIPTION_BACKEND=whisper` or `TRANSCRIPTION_BACKEND=vosk`.
+
+If you upload an `.srt` file in the UI, transcription is skipped and `VOSK_MODEL_PATH` is not required for that render. `VOSK_MODEL_PATH` is also not required when subtitles are turned off, or when you are using Whisper without Vosk fallback.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

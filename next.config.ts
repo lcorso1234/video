@@ -10,7 +10,7 @@ const nextConfig: NextConfig = {
     root: process.cwd(),
   },
   ...(process.env.NODE_ENV === "development"
-    ? { assetPrefix: "http://localhost:3004" }
+    ? { assetPrefix: "http://localhost:3006" }
     : {}),
 };
 
