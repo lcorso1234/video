@@ -28,7 +28,7 @@ type PipelineJobInput = {
   logoFile: File | null;
   introMusicFile: File | null;
   outroMusicFile: File | null;
-  videoFormat: "short" | "wide";
+  videoFormat: "short" | "wide" | "50/50";
   renderSpeedMode: "turbo" | "balanced" | "quality";
   lightningMode: boolean;
   language: string;
@@ -178,8 +178,8 @@ function getRenderSpeedMode(
   return "turbo";
 }
 
-function getVideoFormat(value: FormDataEntryValue | null): "short" | "wide" {
-  if (value === "short" || value === "wide") {
+function getVideoFormat(value: FormDataEntryValue | null): "short" | "wide" | "50/50" {
+  if (value === "short" || value === "wide" || value === "50/50") {
     return value;
   }
   return "wide";
@@ -233,6 +233,7 @@ async function runPipelineJob(jobId: string, input: PipelineJobInput) {
         burnSubtitles: input.subtitlesEnabled,
         enableRetroLook: !isLightning,
         subtitleLanguage: input.language,
+
       },
       { jobId },
     );
@@ -261,11 +262,28 @@ export async function POST(request: Request) {
     const draftInput = draftId ? await resolveRenderInputFromDraft(draftId) : null;
 
     const video = formData.get("video");
+    const videoPath = getText(formData.get("videoPath"));
     const requestVideo = video instanceof File && video.size > 0 ? video : null;
-    const sourceVideo: RenderMediaSource | null = requestVideo || draftInput?.sourceVideo || null;
+    let sourceVideo: RenderMediaSource | null = requestVideo || draftInput?.sourceVideo || null;
+
+    if (!sourceVideo && videoPath) {
+      try {
+        const { stat } = await import("node:fs/promises");
+        const { basename } = await import("node:path");
+        const stats = await stat(videoPath);
+        sourceVideo = {
+          path: videoPath,
+          name: basename(videoPath),
+          size: stats.size,
+          lastModified: stats.mtimeMs,
+        };
+      } catch (err) {
+        console.error("Failed to stat videoPath:", err);
+      }
+    }
 
     if (!sourceVideo) {
-      return errorResponse("Video upload is required.");
+      return errorResponse("Video upload or valid local path is required.");
     }
     if (!isLikelyVideoFile(sourceVideo)) {
       return errorResponse("Video must be a supported format (.mp4, .mov, .m4v, .webm, .mkv, .avi).");
@@ -286,8 +304,28 @@ export async function POST(request: Request) {
       getOptionalFile(formData.get("logo")) || draftInput?.logoFile || null,
     );
 
-    const introMusicFile = getOptionalFile(formData.get("introMusic"));
-    const outroMusicFile = getOptionalFile(formData.get("outroMusic"));
+    let introMusicFile: File | null = getOptionalFile(formData.get("introMusic"));
+    let outroMusicFile: File | null = getOptionalFile(formData.get("outroMusic"));
+
+    const introMusicPath = getText(formData.get("introMusicPath"));
+    const outroMusicPath = getText(formData.get("outroMusicPath"));
+
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const { basename } = await import("node:path");
+
+      if (!introMusicFile && introMusicPath) {
+        const buffer = await readFile(introMusicPath);
+        introMusicFile = new File([buffer], basename(introMusicPath), { type: "audio/mpeg" });
+      }
+
+      if (!outroMusicFile && outroMusicPath) {
+        const buffer = await readFile(outroMusicPath);
+        outroMusicFile = new File([buffer], basename(outroMusicPath), { type: "audio/mpeg" });
+      }
+    } catch (err) {
+      console.error("Failed to read music path:", err);
+    }
 
     const jobId = randomUUID();
 
@@ -298,6 +336,7 @@ export async function POST(request: Request) {
       introMusicFile,
       outroMusicFile,
       videoFormat: getVideoFormat(formData.get("videoFormat")),
+
       renderSpeedMode,
       lightningMode: renderSpeedMode === "turbo",
       language: subtitleLanguage,
@@ -331,6 +370,7 @@ export async function POST(request: Request) {
       lowerThirdSubtitle: getText(formData.get("lowerThirdSubtitle")),
       lowerThirdStart: getNumber(formData.get("lowerThirdStart"), 3),
       lowerThirdDuration: getNumber(formData.get("lowerThirdDuration"), 6),
+
       cleanupDirectories: temporaryDirectories,
     };
 

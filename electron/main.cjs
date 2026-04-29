@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 const path = require("node:path");
-const { app, BrowserWindow, shell } = require("electron");
+const fs = require("node:fs/promises");
+const { app, BrowserWindow, shell, ipcMain, dialog } = require("electron");
 
 const appUrl = process.env.ELECTRON_START_URL || "http://localhost:3006";
 const isDev = !app.isPackaged;
@@ -12,6 +13,8 @@ function createWindow() {
     height: 920,
     minWidth: 1024,
     minHeight: 700,
+    titleBarStyle: "hiddenInset", // Better on macOS
+    trafficLightPosition: { x: 20, y: 20 },
     autoHideMenuBar: true,
     backgroundColor: "#111820",
     webPreferences: {
@@ -32,10 +35,37 @@ function createWindow() {
   if (isDev) {
     window.webContents.openDevTools({ mode: "detach" });
   }
+
+  return window;
 }
 
 app.whenReady().then(() => {
-  createWindow();
+  const mainWindow = createWindow();
+
+  // IPC Handlers
+  ipcMain.handle("dialog:openFile", async (event, options) => {
+    const result = await dialog.showOpenDialog(mainWindow, options);
+    return result;
+  });
+
+  ipcMain.handle("app:getVersion", () => {
+    return app.getVersion();
+  });
+
+  ipcMain.handle("fs:readFile", async (event, filePath) => {
+    const buffer = await fs.readFile(filePath);
+    return buffer;
+  });
+
+  ipcMain.handle("fs:writeFile", async (event, filePath, data) => {
+    await fs.writeFile(filePath, Buffer.from(data));
+    return true;
+  });
+
+  ipcMain.handle("dialog:saveFile", async (event, options) => {
+    const result = await dialog.showSaveDialog(mainWindow, options);
+    return result;
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

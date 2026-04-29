@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { access, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1039,7 +1039,14 @@ function buildAssFromTimedWords(input: {
   textColor: string;
   highlightColor: string;
   hideRanges: Array<{ startSeconds: number; endSeconds: number }>;
+  videoFormat?: "short" | "wide";
 }) {
+  const isShort = input.videoFormat === "short";
+  const playResX = isShort ? 1080 : 1920;
+  const playResY = isShort ? 1920 : 1080;
+  const marginV = isShort ? 480 : 36;
+  const marginH = isShort ? 80 : 45;
+
   const hiddenRanges = input.hideRanges
     .map((range) => ({
       start: Math.max(0, Number(range.startSeconds) || 0),
@@ -1055,10 +1062,13 @@ function buildAssFromTimedWords(input: {
     return "";
   }
 
-  const safeFontSize = Math.max(
+  let safeFontSize = Math.max(
     12,
     Math.min(maxSubtitleFontSize, Number(input.fontSize) || defaultSubtitleFontSize),
   );
+  if (isShort) {
+    safeFontSize = Math.round(safeFontSize * 0.9);
+  }
   const textBgr = toAssBgrHex(input.textColor || "#ffffff");
   const highlightBgr = toAssBgrHex(input.highlightColor || defaultSubtitleHighlightColor);
   const highlightTextBgr = toAssBgrHex(getReadableTextColorHex(input.highlightColor));
@@ -1066,15 +1076,15 @@ function buildAssFromTimedWords(input: {
   const header = [
     "[Script Info]",
     "ScriptType: v4.00+",
-    "PlayResX: 1920",
-    "PlayResY: 1080",
-    "WrapStyle: 2",
+    `PlayResX: ${playResX}`,
+    `PlayResY: ${playResY}`,
+    "WrapStyle: 1",
     "ScaledBorderAndShadow: yes",
     "",
     "[V4+ Styles]",
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-    `Style: Default,${fontName},${safeFontSize},&H00${textBgr},&H00${highlightBgr},&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,1.8,0,2,26,26,36,1`,
-    `Style: Highlight,${fontName},${safeFontSize},&H00${highlightTextBgr},&H00${highlightBgr},&H00${highlightBgr},&H00${highlightBgr},-1,0,0,0,100,100,0,0,3,1.6,0,2,26,26,36,1`,
+    `Style: Default,${fontName},${safeFontSize},&H00${textBgr},&H00${highlightBgr},&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,1.8,0,2,${marginH},${marginH},${marginV},1`,
+    `Style: Highlight,${fontName},${safeFontSize},&H00${highlightTextBgr},&H00${highlightBgr},&H00${highlightBgr},&H00${highlightBgr},-1,0,0,0,100,100,0,0,3,1.6,0,2,${marginH},${marginH},${marginV},1`,
     "",
     "[Events]",
     "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
@@ -1142,10 +1152,15 @@ function buildSubtitleForceStyle(input: RenderVideoInput) {
   const fontName = (input.subtitleFontChoice || "Arial")
     .replace(/,/g, " ")
     .replace(/'/g, "");
-  const fontSize = Math.max(
+  let fontSize = Math.max(
     12,
     Math.min(maxSubtitleFontSize, Number(input.subtitleFontSize) || defaultSubtitleFontSize),
   );
+  if (input.videoFormat === "short") {
+    // FFmpeg's subtitles filter scales by video height (1920 in shorts vs 1080 in landscape). 
+    // We must dramatically scale the font size DOWN for vertical shorts otherwise the text truncates.
+    fontSize = Math.round(fontSize * 0.42);
+  }
   const textBgr = toAssBgrHex(input.subtitleTextColor || "#ffffff");
   const highlightBgr = toAssBgrHex(input.subtitleHighlightColor || defaultSubtitleHighlightColor);
   return [
@@ -1159,7 +1174,10 @@ function buildSubtitleForceStyle(input: RenderVideoInput) {
     "Outline=0",
     "Shadow=0",
     "Alignment=2",
-    "MarginV=36",
+    "WrapStyle=1",
+    `MarginV=${input.videoFormat === "short" ? 480 : 36}`,
+    `MarginL=${input.videoFormat === "short" ? 64 : 48}`,
+    `MarginR=${input.videoFormat === "short" ? 64 : 48}`,
   ].join(",");
 }
 
@@ -1178,8 +1196,6 @@ function escapeFilterValue(value: string) {
     .replace(/:/g, "\\:")
     .replace(/,/g, "\\,")
     .replace(/'/g, "\\'")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
     .replace(/%/g, "\\%");
 }
 
@@ -1665,14 +1681,20 @@ function buildVideoFilter(
   const subtitleText = lowerThird.subtitle?.trim() || "";
   const start = Math.max(0, lowerThird.start);
   const end = start + Math.max(0.5, lowerThird.duration);
+  const isVertical = target.height > target.width;
   const accentWidth = Math.max(11, Math.round(target.width * 0.008));
   const horizontalPadding = Math.max(16, Math.round(target.width * 0.01));
   const verticalPadding = Math.max(12, Math.round(target.height * 0.012));
   const lineGap = Math.max(4, Math.round(target.height * 0.005));
   const borderWidth = Math.max(2, Math.round(target.width * 0.0016));
   const shadowOffset = Math.max(4, Math.round(target.width * 0.003));
-  const titleSize = Math.max(24, Math.round(target.height * 0.037));
-  const subtitleSize = Math.max(18, Math.round(target.height * 0.026));
+  
+  const titleSize = isVertical
+    ? Math.max(24, Math.round(target.width * 0.055))
+    : Math.max(24, Math.round(target.height * 0.037));
+  const subtitleSize = isVertical
+    ? Math.max(18, Math.round(target.width * 0.038))
+    : Math.max(18, Math.round(target.height * 0.026));
   const approxTitleWidth = Math.max(
     Math.round(target.width * 0.14),
     Math.round(titleText.length * titleSize * 0.56),
@@ -1684,7 +1706,7 @@ function buildVideoFilter(
   const boxWidth = Math.max(
     Math.round(target.width * 0.24),
     Math.min(
-      Math.round(target.width * 0.58),
+      Math.round(target.width * (isVertical ? 0.85 : 0.58)),
       Math.round(estimatedTextWidth + accentWidth + horizontalPadding * 2 + 8),
     ),
   );
@@ -1695,7 +1717,9 @@ function buildVideoFilter(
     subtitleText ? Math.round(target.height * 0.09) : Math.round(target.height * 0.065),
     contentHeight + verticalPadding * 2,
   );
-  const bottomMargin = Math.max(22, Math.round(target.width * 0.018));
+  const bottomMargin = isVertical
+    ? Math.max(280, Math.round(target.height * 0.22))
+    : Math.max(22, Math.round(target.width * 0.018));
   const boxX = target.width - boxWidth;
   const boxY = target.height - boxHeight - bottomMargin;
   const titleY = boxY + verticalPadding;
@@ -1703,15 +1727,15 @@ function buildVideoFilter(
   const slideDuration = getLowerThirdSlideDuration(end - start);
   const offscreenX = target.width + Math.max(26, Math.round(target.width * 0.018));
   const slideProgress = `((t-${start})/${slideDuration})`;
-  const animatedBoxX = `if(lt(t\\,${start + slideDuration})\\,${offscreenX}+(${boxX - offscreenX})*${slideProgress}\\,${boxX})`;
+  const animatedBoxX = `if(lt(t,${start + slideDuration}),${offscreenX}+(${boxX - offscreenX})*${slideProgress},${boxX})`;
   const textXPadding = Math.max(14, Math.round(target.width * 0.0085));
   const titleTargetX = boxX + accentWidth + textXPadding;
   const subtitleTargetX = boxX + accentWidth + textXPadding;
   const titleStartX = offscreenX + accentWidth + textXPadding;
   const subtitleStartX = offscreenX + accentWidth + textXPadding;
-  const animatedTitleX = `if(lt(t\\,${start + slideDuration})\\,${titleStartX}+(${titleTargetX - titleStartX})*${slideProgress}\\,${titleTargetX})`;
-  const animatedSubtitleX = `if(lt(t\\,${start + slideDuration})\\,${subtitleStartX}+(${subtitleTargetX - subtitleStartX})*${slideProgress}\\,${subtitleTargetX})`;
-  const enable = `between(t\\,${start}\\,${end})`;
+  const animatedTitleX = `if(lt(t,${start + slideDuration}),${titleStartX}+(${titleTargetX - titleStartX})*${slideProgress},${titleTargetX})`;
+  const animatedSubtitleX = `if(lt(t,${start + slideDuration}),${subtitleStartX}+(${subtitleTargetX - subtitleStartX})*${slideProgress},${subtitleTargetX})`;
+  const enable = `between(t,${start},${end})`;
   const font = fontPath ? `:fontfile='${escapeFilterValue(fontPath)}'` : "";
   const lowerThirdPanelColor = blendHexColors(theme.accentColor, "#05080d", 0.78);
   const boxColor = `${toFfmpegHex(lowerThirdPanelColor)}@0.9`;
@@ -1726,21 +1750,21 @@ function buildVideoFilter(
     : "white@0.78";
 
   filters.push(
-    `drawbox=x=${animatedBoxX}+${shadowOffset}:y=${boxY + shadowOffset}:w=${boxWidth}:h=${boxHeight}:color=${boxShadowColor}:t=fill:enable='${enable}'`,
-    `drawbox=x=${animatedBoxX}:y=${boxY}:w=${boxWidth}:h=${boxHeight}:color=${boxColor}:t=fill:enable='${enable}'`,
-    `drawbox=x=${animatedBoxX}:y=${boxY}:w=${boxWidth}:h=${boxHeight}:color=${boxBorderColor}:t=${borderWidth}:enable='${enable}'`,
-    `drawbox=x=${animatedBoxX}:y=${boxY}:w=${accentWidth}:h=${boxHeight}:color=${accentColor}:t=fill:enable='${enable}'`,
+    `drawbox=x='${escapeFilterValue(animatedBoxX)}+${shadowOffset}':y=${boxY + shadowOffset}:w=${boxWidth}:h=${boxHeight}:color=${boxShadowColor}:t=fill:enable='${escapeFilterValue(enable)}'`,
+    `drawbox=x='${escapeFilterValue(animatedBoxX)}':y=${boxY}:w=${boxWidth}:h=${boxHeight}:color=${boxColor}:t=fill:enable='${escapeFilterValue(enable)}'`,
+    `drawbox=x='${escapeFilterValue(animatedBoxX)}':y=${boxY}:w=${boxWidth}:h=${boxHeight}:color=${boxBorderColor}:t=${borderWidth}:enable='${escapeFilterValue(enable)}'`,
+    `drawbox=x='${escapeFilterValue(animatedBoxX)}':y=${boxY}:w=${accentWidth}:h=${boxHeight}:color=${accentColor}:t=fill:enable='${escapeFilterValue(enable)}'`,
   );
 
   if (lowerThird.title) {
     filters.push(
-      `drawtext=text='${escapeFilterValue(lowerThird.title)}'${font}:fontcolor=${textColor}:fontsize=${titleSize}:shadowcolor=black@0.45:shadowx=2:shadowy=2:x=${animatedTitleX}:y=${titleY}:enable='${enable}'`,
+      `drawtext=text='${escapeFilterValue(lowerThird.title)}'${font}:fontcolor=${textColor}:fontsize=${titleSize}:shadowcolor=black@0.45:shadowx=2:shadowy=2:x='${escapeFilterValue(animatedTitleX)}':y=${titleY}:enable='${escapeFilterValue(enable)}'`,
     );
   }
 
   if (lowerThird.subtitle) {
     filters.push(
-      `drawtext=text='${escapeFilterValue(lowerThird.subtitle)}'${font}:fontcolor=${subtitleColor}:fontsize=${subtitleSize}:shadowcolor=black@0.35:shadowx=1:shadowy=1:x=${animatedSubtitleX}:y=${subtitleY}:enable='${enable}'`,
+      `drawtext=text='${escapeFilterValue(lowerThird.subtitle)}'${font}:fontcolor=${subtitleColor}:fontsize=${subtitleSize}:shadowcolor=black@0.35:shadowx=1:shadowy=1:x='${escapeFilterValue(animatedSubtitleX)}':y=${subtitleY}:enable='${escapeFilterValue(enable)}'`,
     );
   }
 
@@ -1788,10 +1812,14 @@ async function normalizeClip(params: {
   subtitleForceStyle?: string;
   theme: RenderTheme;
   quality: EncodeProfile;
-  fontPath: string | null;
   enableRetroLook: boolean;
+
+  logoPath?: string | null;
+  videoFormat?: string;
 }) {
   const mediaInfo = await probeMedia(params.inputPath);
+  const is5050 = params.videoFormat === "50/50";
+
   const videoFilter = buildVideoFilter(
     params.target,
     params.lowerThird ?? null,
@@ -1810,27 +1838,43 @@ async function normalizeClip(params: {
             : ""
       }`
     : "";
-  const args = mediaInfo.hasAudio
-    ? ["-y", "-i", params.inputPath]
-    : [
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        "anullsrc=channel_layout=stereo:sample_rate=48000",
-        "-i",
-        params.inputPath,
-      ];
+
+  const args = ["-y"];
 
   if (mediaInfo.hasAudio) {
-    args.push("-map", "0:v:0", "-map", "0:a:0?");
+    args.push("-i", params.inputPath);
   } else {
-    args.push("-map", "1:v:0", "-map", "0:a:0", "-shortest");
+    args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-i", params.inputPath);
   }
 
+  if (params.logoPath) {
+    args.push("-i", params.logoPath);
+  }
+
+  // Build filter complex
+  let filterComplex = "";
+  const v1 = mediaInfo.hasAudio ? "0:v:0" : "1:v:0";
+  const logoInputIdx = params.logoPath ? (mediaInfo.hasAudio ? 1 : 2) : null;
+
+  // Initial video processing (scaling, subtitles, etc.)
+  let videoProcessing = `${videoFilter}${subtitleFilter}`;
+  
+
+
+  filterComplex = `[${v1}]${videoProcessing}[v_base];`;
+
+  filterComplex += "[v_base]copy[v_processed];";
+
+  if (logoInputIdx !== null) {
+    filterComplex += `[v_processed][${logoInputIdx}:v]overlay=x='(W-w)/2':y='(H-h)/2'[vout]`;
+  } else {
+    filterComplex += "[v_processed]copy[vout]";
+  }
+
+  args.push("-filter_complex", filterComplex);
+  args.push("-map", "[vout]", "-map", mediaInfo.hasAudio ? "0:a:0?" : "0:a:0");
+
   args.push(
-    "-vf",
-    `${videoFilter}${subtitleFilter}`,
     ...buildVideoEncoderArgs(params.quality),
     "-pix_fmt",
     "yuv420p",
@@ -1893,15 +1937,22 @@ async function createTrailerBrandClip(params: {
   const outroSubtitle = params.subtitle?.trim() || "Stay tuned for the next release";
   const introLogoFadeDuration = Math.min(0.75, Math.max(0.24, duration * 0.28));
   const outroTextFadeDuration = Math.min(0.9, Math.max(0.32, duration * 0.34));
-  const outroTextAlphaExpr = `if(lt(t\\,${outroTextFadeDuration})\\,t/${outroTextFadeDuration}\\,1)`;
+  const outroTextAlphaExpr = `if(lt(t,${outroTextFadeDuration}),t/${outroTextFadeDuration},1)`;
   const contentAlphaExpr = "1";
   const baseColor = "0x2A3439";
   const textColor = toFfmpegHex(params.theme.textColor);
-  const font = params.fontPath
-    ? `:fontfile='${escapeFilterValue(params.fontPath)}'`
-    : "";
-  const introTitleSize = Math.max(46, Math.round(params.target.height * 0.066));
-  const introSubtitleSize = Math.max(24, Math.round(params.target.height * 0.036));
+  const fontFile = params.fontPath ? escapeFilterValue(params.fontPath) : "";
+  
+  const workingDirectory = path.dirname(params.outputPath);
+  const isVertical = params.target.height > params.target.width;
+  
+  // Scale font sizes based on width for vertical format to avoid text overflow
+  const introTitleSize = isVertical 
+    ? Math.max(46, Math.round(params.target.width * 0.08))
+    : Math.max(46, Math.round(params.target.height * 0.066));
+  const introSubtitleSize = isVertical
+    ? Math.max(24, Math.round(params.target.width * 0.045))
+    : Math.max(24, Math.round(params.target.height * 0.036));
 
   const args = [
     "-y",
@@ -1950,10 +2001,22 @@ async function createTrailerBrandClip(params: {
       filters.push(`${visualLabel}[logo]overlay=x='(W-w)/2':y='(H-h)/2':shortest=1[vstage]`);
       visualLabel = "[vstage]";
     } else {
-      const introTitleEscaped = escapeFilterValue(introTitle);
-      const introSubtitleEscaped = escapeFilterValue(introSubtitle);
+      // Create text files for everything to avoid escaping issues
+      const textFilesDir = path.join(workingDirectory, "text-files");
+      if (!existsSync(textFilesDir)) {
+        mkdirSync(textFilesDir, { recursive: true });
+      }
+
+      const introTitlePath = path.join(textFilesDir, "intro-title.txt");
+      const introSubtitlePath = path.join(textFilesDir, "intro-subtitle.txt");
+      writeFileSync(introTitlePath, introTitle, "utf-8");
+      writeFileSync(introSubtitlePath, introSubtitle, "utf-8");
+
+      const introAlphaEscaped = escapeFilterValue(contentAlphaExpr);
+      const introFont = fontFile ? `:fontfile='${escapeFilterValue(fontFile)}'` : "";
       filters.push(
-        `${visualLabel}drawtext=text='${introTitleEscaped}'${font}:fontcolor=${textColor}:fontsize=${introTitleSize}:x=(w-text_w)/2:y=h*0.44:alpha='${contentAlphaExpr}',drawtext=text='${introSubtitleEscaped}'${font}:fontcolor=${textColor}@0.85:fontsize=${introSubtitleSize}:x=(w-text_w)/2:y=h*0.56:alpha='${contentAlphaExpr}'[vstage]`,
+        `${visualLabel}drawtext=textfile='${escapeFilterValue(introTitlePath)}'${introFont}:fontcolor=${textColor}:fontsize=${introTitleSize}:x=(w-text_w)/2:y=h*0.44:alpha='${introAlphaEscaped}'[vintro1]`,
+        `[vintro1]drawtext=textfile='${escapeFilterValue(introSubtitlePath)}'${introFont}:fontcolor=${textColor}@0.85:fontsize=${introSubtitleSize}:x=(w-text_w)/2:y=h*0.56:alpha='${introAlphaEscaped}'[vstage]`,
       );
       visualLabel = "[vstage]";
     }
@@ -1972,6 +2035,13 @@ async function createTrailerBrandClip(params: {
       .map((line) => line.trim())
       .filter(Boolean);
     outroLines.push(...extraCredits);
+
+    // Create text files for everything to avoid escaping issues
+    const textFilesDir = path.join(workingDirectory, "text-files");
+    if (!existsSync(textFilesDir)) {
+      mkdirSync(textFilesDir, { recursive: true });
+    }
+
     if (outroLines.length === 0 && !params.logoPath) {
       if (outroTitle.trim()) {
         outroLines.push(outroTitle.trim());
@@ -1984,18 +2054,32 @@ async function createTrailerBrandClip(params: {
       }
     }
 
-    const creditsFontSize = Math.max(22, Math.round(params.target.height * 0.058));
+    const maxLineLength = Math.max(1, ...outroLines.map((line) => line.length));
+    const safeFontSizeLimit = Math.floor((params.target.width * 0.88) / (maxLineLength * 0.55));
+
+    let creditsFontSize = isVertical
+      ? Math.max(22, Math.round(params.target.width * 0.042))
+      : Math.max(22, Math.round(params.target.height * 0.058));
+
+    creditsFontSize = Math.max(18, Math.min(creditsFontSize, safeFontSizeLimit));
     const lineHeight = Math.max(creditsFontSize + 8, Math.round(creditsFontSize * 1.42));
-    const creditsStartY = Math.round(params.target.height * 0.43);
+    const creditsStartY = isVertical 
+      ? Math.round(params.target.height * 0.38)
+      : Math.round(params.target.height * 0.43);
 
     if (outroLines.length > 0) {
       let currentLabel = visualLabel;
       for (let i = 0; i < outroLines.length; i += 1) {
         const nextLabel = i === outroLines.length - 1 ? "[vstage]" : `[vstage-credits-${i}]`;
-        const escapedLine = escapeFilterValue(outroLines[i]);
+        const textFilePath = path.join(textFilesDir, `outro-${i}.txt`);
+        writeFileSync(textFilePath, outroLines[i], "utf-8");
+        
+        const escapedAlpha = escapeFilterValue(outroTextAlphaExpr);
         const lineY = creditsStartY + i * lineHeight;
+        const stylePrefix = i === 0 ? ":borderw=2:bordercolor=black@0.52:shadowcolor=black@0.35:shadowx=2:shadowy=2" : "";
+        const fontPart = fontFile ? `:fontfile='${escapeFilterValue(fontFile)}'` : "";
         filters.push(
-          `${currentLabel}drawtext=text='${escapedLine}'${font}:fontcolor=${textColor}@0.95:fontsize=${creditsFontSize}:x=(w-text_w)/2:y=${lineY}:alpha='${outroTextAlphaExpr}'${i === 0 ? ":borderw=2:bordercolor=black@0.52:shadowcolor=black@0.35:shadowx=2:shadowy=2" : ""}${nextLabel}`,
+          `${currentLabel}drawtext=textfile='${escapeFilterValue(textFilePath)}'${fontPart}:fontcolor=${textColor}@0.95:fontsize=${creditsFontSize}:x=(w-text_w)/2:y=${lineY}:alpha='${escapedAlpha}'${stylePrefix}${nextLabel}`,
         );
         currentLabel = nextLabel;
       }
@@ -2042,6 +2126,14 @@ function buildTargetFromMainVideo(
   }
 
   if (outputFormat === "wide") {
+    return {
+      width: 1920,
+      height: 1080,
+      fps: clampFrameRate(mediaInfo.fps),
+    };
+  }
+
+  if (outputFormat === "50/50") {
     return {
       width: 1920,
       height: 1080,
@@ -2293,6 +2385,14 @@ export async function renderVideo(
       hasConfiguredSubtitleModel(subtitleLanguage);
     const wantsLowerThird =
       Boolean(input.lowerThirdTitle?.trim()) || Boolean(input.lowerThirdSubtitle?.trim());
+
+    const sourceMedia = await probeMedia(sourceUploadPath);
+    const target = buildTargetFromMainVideo(sourceMedia, input.videoFormat);
+    const theme = resolveTheme(input);
+    const quality = resolveEncodeProfile(input.qualityProfile);
+    const soundtrackChoice = resolveSoundtrackChoice(input.soundtrackChoice);
+    const fontPath = await resolveFontPath(theme.fontChoice);
+
     const useFastPassThrough =
       input.qualityProfile === "fast" &&
       !shouldGenerateTrailerIntroOutro &&
@@ -2303,7 +2403,11 @@ export async function renderVideo(
       !input.brandLogo?.size &&
       (!burnSubtitles || !subtitlesEnabled) &&
       canFastPathSubtitles &&
-      !wantsLowerThird;
+      !wantsLowerThird &&
+
+      !enableRetroLook &&
+      sourceMedia.width === target.width &&
+      sourceMedia.height === target.height;
 
     if (useFastPassThrough) {
       try {
@@ -2390,12 +2494,6 @@ export async function renderVideo(
       }
     }
 
-    const sourceMedia = await probeMedia(sourceUploadPath);
-    const target = buildTargetFromMainVideo(sourceMedia, input.videoFormat);
-    const theme = resolveTheme(input);
-    const quality = resolveEncodeProfile(input.qualityProfile);
-    const soundtrackChoice = resolveSoundtrackChoice(input.soundtrackChoice);
-    const fontPath = await resolveFontPath(theme.fontChoice);
     reportProgress("running", 17, "Analyzed source video and resolved render settings.");
 
     const normalizedSourcePath = path.join(workingDirectory, "main-normalized.mp4");
@@ -2430,19 +2528,22 @@ export async function renderVideo(
             ),
           }
         : null;
-    const subtitleEntryEndSeconds =
-      burnSubtitles && lowerThird
-        ? lowerThird.start + getLowerThirdSlideDuration(lowerThird.duration)
-        : 0;
-    const subtitleHideRanges =
-      subtitleEntryEndSeconds > 0.01
-        ? [
-            {
-              startSeconds: 0,
-              endSeconds: subtitleEntryEndSeconds,
-            },
-          ]
-        : [];
+    const subtitleHideRanges: Array<{ startSeconds: number; endSeconds: number }> = [];
+    if (burnSubtitles && lowerThird) {
+      // Hide subtitles from the very beginning of the video up until the lower third finishes animating in
+      subtitleHideRanges.push({
+        startSeconds: 0,
+        endSeconds: lowerThird.start + getLowerThirdSlideDuration(lowerThird.duration),
+      });
+
+      // Additionally, for vertical Shorts (9:16), completely hide subtitles while the lower third is displayed
+      if (input.videoFormat === "short") {
+        subtitleHideRanges.push({
+          startSeconds: lowerThird.start,
+          endSeconds: lowerThird.start + Math.max(0.5, lowerThird.duration),
+        });
+      }
+    }
 
     if (subtitlesEnabled) {
       const subtitleAudioPath = path.join(workingDirectory, "subtitle-source.wav");
@@ -2517,6 +2618,7 @@ export async function renderVideo(
           textColor: input.subtitleTextColor || "#ffffff",
           highlightColor: input.subtitleHighlightColor || defaultSubtitleHighlightColor,
           hideRanges: subtitleHideRanges,
+          videoFormat: input.videoFormat,
         });
         if (karaokeAss.trim()) {
           const assPath = path.join(workingDirectory, "subtitles-karaoke.ass");
@@ -2528,20 +2630,6 @@ export async function renderVideo(
         void 0;
       }
     }
-
-    await normalizeClip({
-      inputPath: sourceUploadPath,
-      outputPath: normalizedSourcePath,
-      target,
-      lowerThird,
-      subtitlePath: burnSubtitles ? subtitleBurnPath : null,
-      subtitleForceStyle: burnSubtitles ? buildSubtitleForceStyle(input) : undefined,
-      theme,
-      quality,
-      fontPath,
-      enableRetroLook,
-    });
-    reportProgress("running", 30, "Normalized main source clip.");
 
     if (logoUploadPath && isSvgPath(logoUploadPath)) {
       const rasterizedLogoPath = path.join(workingDirectory, "logo-rasterized.png");
@@ -2562,6 +2650,22 @@ export async function renderVideo(
       });
       reportProgress("running", 35, "Prepared logo overlay.");
     }
+
+    await normalizeClip({
+      inputPath: sourceUploadPath,
+      outputPath: normalizedSourcePath,
+      target,
+      lowerThird,
+      subtitlePath: burnSubtitles ? subtitleBurnPath : null,
+      subtitleForceStyle: burnSubtitles ? buildSubtitleForceStyle(input) : undefined,
+      theme,
+      quality,
+      fontPath,
+      enableRetroLook,
+
+      videoFormat: input.videoFormat,
+    });
+    reportProgress("running", 30, "Normalized main source clip.");
 
     if (shouldGenerateTrailerIntroOutro) {
       const trailerRawIntroPath = path.join(workingDirectory, "trailer-intro-raw.mp4");

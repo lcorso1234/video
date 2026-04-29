@@ -5,6 +5,26 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { isLikelyVideoFile, VIDEO_UPLOAD_ACCEPT_ATTR } from "@/lib/media-file";
 
+const isElectron = typeof window !== "undefined" && !!window.electronAPI;
+const isMac = isElectron && window.electronAPI.platform === "darwin";
+
+function TitleBar() {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  if (!mounted || !isElectron) return null;
+  return (
+    <div
+      className="fixed top-0 left-0 right-0 h-10 z-[100] flex items-center justify-center pointer-events-none select-none"
+      style={{ WebkitAppRegion: "drag" } as any}
+    >
+      <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-medium pt-1">
+        Video Editor Pro
+      </div>
+    </div>
+  );
+}
+
 type RenderJobPhase = "queued" | "running" | "completed" | "failed";
 
 type RenderStatusResponse = {
@@ -381,10 +401,10 @@ function buildYouTubeDescription(input: {
 }
 
 function buildRenderFormData(input: {
-  videoFile?: File;
+  videoFile?: File | { nativePath: string; name: string; type?: string } | null;
   logoFile: File;
   trailerMusicFile?: File | null;
-  videoFormat: "short" | "wide";
+  videoFormat: "short" | "wide" | "50/50";
   credits: string;
   subtitleHighlightColor: string;
   subtitlesEnabled: boolean;
@@ -393,11 +413,33 @@ function buildRenderFormData(input: {
 }) {
   const formData = new FormData();
   if (input.videoFile) {
-    formData.append("video", input.videoFile);
+    if ("nativePath" in input.videoFile) {
+      formData.append("videoPath", input.videoFile.nativePath);
+    } else if ("path" in input.videoFile && typeof (input.videoFile as any).path === "string" && (input.videoFile as any).path) {
+      formData.append("videoPath", (input.videoFile as any).path);
+    } else {
+      const file = input.videoFile as File;
+      if (file.size > 100 * 1024 * 1024) {
+        throw new Error("Video file is too large for standard upload. Please use the 'Pick Native' button.");
+      }
+      formData.append("video", file);
+    }
   }
   if (input.trailerMusicFile) {
-    formData.append("introMusic", input.trailerMusicFile);
-    formData.append("outroMusic", input.trailerMusicFile);
+    if ("nativePath" in input.trailerMusicFile) {
+      formData.append("introMusicPath", input.trailerMusicFile.nativePath);
+      formData.append("outroMusicPath", input.trailerMusicFile.nativePath);
+    } else if ("path" in input.trailerMusicFile && typeof (input.trailerMusicFile as any).path === "string" && (input.trailerMusicFile as any).path) {
+      formData.append("introMusicPath", (input.trailerMusicFile as any).path);
+      formData.append("outroMusicPath", (input.trailerMusicFile as any).path);
+    } else {
+      const file = input.trailerMusicFile as File;
+      if (file.size > 50 * 1024 * 1024) {
+        throw new Error("Audio file is too large for standard upload. Please use the 'Pick Native' button.");
+      }
+      formData.append("introMusic", file);
+      formData.append("outroMusic", file);
+    }
   }
   formData.append("logo", input.logoFile);
   formData.append("generateTrailerIntroOutro", "true");
@@ -446,15 +488,17 @@ async function parseRenderStartError(response: Response) {
 }
 
 export default function Home() {
+  const [isMounted, setIsMounted] = useState(false);
+  useEffect(() => setIsMounted(true), []);
   const [activePhase, setActivePhase] = useState<AppPhase>(1);
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoPreviewUrl, setLogoPreviewUrl] = useState("");
   const [logoPalette, setLogoPalette] = useState<string[]>([]);
   const [subtitleHighlightColor, setSubtitleHighlightColor] = useState("");
   const [logoPaletteError, setLogoPaletteError] = useState("");
-  const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [trailerMusicFile, setTrailerMusicFile] = useState<File | null>(null);
-  const [videoFormat, setVideoFormat] = useState<"short" | "wide">("wide");
+  const [videoFile, setVideoFile] = useState<File | { nativePath: string; name: string; type?: string } | null>(null);
+  const [trailerMusicFile, setTrailerMusicFile] = useState<File | { nativePath: string; name: string; type?: string } | null>(null);
+  const [videoFormat, setVideoFormat] = useState<"short" | "wide" | "50/50">("wide");
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
   const [credits, setCredits] = useState(() => buildCreditsTemplate());
   const [lowerThirdCompany, setLowerThirdCompany] = useState(DEFAULT_LOWER_THIRD_COMPANY);
@@ -681,6 +725,120 @@ export default function Home() {
     );
   }, [result?.jobId, credits, lowerThirdCompany, lowerThirdPerson, videoSummaryInput]);
 
+    async function handleNativePick(type: "video" | "image" | "audio") {
+    if (!isElectron) return null;
+
+    const filters =
+      type === "video"
+        ? [{ name: "Videos", extensions: ["mp4", "mov", "m4v", "webm", "mkv", "avi"] }]
+        : type === "image"
+        ? [{ name: "Images", extensions: ["svg", "png", "jpg", "jpeg", "webp"] }]
+        : [{ name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "flac", "webm"] }];
+
+    const dialogResult = await window.electronAPI.showOpenDialog({
+      properties: ["openFile"],
+      filters,
+    });
+
+    if (dialogResult.canceled || dialogResult.filePaths.length === 0) return null;
+
+    const filePath = dialogResult.filePaths[0];
+    const fileName = filePath.split(/[\\/]/).pop() || "file";
+
+    let mimeType = "application/octet-stream";
+    if (type === "video") mimeType = "video/mp4";
+    else if (type === "image")
+      mimeType = fileName.toLowerCase().endsWith(".svg") ? "image/svg+xml" : "image/png";
+    else if (type === "audio") mimeType = "audio/mpeg";
+
+    if (type === "video" || type === "audio") {
+      return { nativePath: filePath, name: fileName, type: mimeType };
+    }
+
+    const buffer = await window.electronAPI.readFile(filePath);
+
+    return new File([buffer], fileName, { type: mimeType });
+  }
+
+  async function handleLogoSelection(file: File | null) {
+    if (!file) return;
+
+    if (!isAcceptedLogoFile(file)) {
+      setLogoFile(null);
+      setErrorMessage("Logo must be .svg, .png, .jpg/.jpeg, or .webp.");
+      return;
+    }
+
+    let processedFile: File | null = file;
+    if (!isSvgLogoFile(file)) {
+      try {
+        processedFile = await convertRasterLogoToSvg(file);
+      } catch {
+        setLogoFile(null);
+        setErrorMessage("Unable to convert logo image to SVG.");
+        return;
+      }
+    }
+
+    setErrorMessage("");
+    setLogoFile(processedFile);
+    setVideoFile(null);
+    setResult(null);
+    setRenderStatus(null);
+    setStatusMessage(
+      file && !isSvgLogoFile(file)
+        ? "Phase 1 ready. Image logo converted to SVG for intro/outro rendering."
+        : "Phase 1 ready. Review the preview, then continue to phase 2.",
+    );
+    setActivePhase(1);
+  }
+
+  async function handleVideoSelection(file: File | { nativePath: string; name: string; type?: string } | null) {
+    if (file && !isLikelyVideoFile(file)) {
+      setVideoFile(null);
+      setResult(null);
+      setRenderStatus(null);
+      setErrorMessage("Video must be a supported format (.mp4, .mov, .m4v, .webm, .mkv, .avi).");
+      return;
+    }
+
+    setVideoFile(file);
+    setResult(null);
+    setRenderStatus(null);
+    if (file) {
+      setErrorMessage("");
+      setStatusMessage("Phase 2 ready. Continue to phase 3 for final options and render.");
+    }
+  }
+
+  async function handleNativeExport() {
+    if (!isElectron || !result) return;
+
+    try {
+      setStatusMessage("Preparing native export...");
+      const response = await fetch(result.downloadUrl);
+      if (!response.ok) throw new Error("Unable to fetch video for export.");
+
+      const blob = await response.blob();
+      const buffer = new Uint8Array(await blob.arrayBuffer());
+
+      const dialogResult = await window.electronAPI.showSaveDialog({
+        defaultPath: downloadFilename,
+        filters: [{ name: "Videos", extensions: ["mp4"] }],
+      });
+
+      if (dialogResult.canceled || !dialogResult.filePath) {
+        setStatusMessage("Export canceled.");
+        return;
+      }
+
+      await window.electronAPI.writeFile(dialogResult.filePath, buffer);
+      setStatusMessage(`Video exported to ${dialogResult.filePath}`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Export failed.");
+    }
+  }
+
   async function handleAutoSummary() {
     setIsAutoSummarizing(true);
     setErrorMessage("");
@@ -867,7 +1025,8 @@ export default function Home() {
   const phase3Unlocked = activePhase >= 3;
 
   return (
-    <main className="relative min-h-screen overflow-hidden px-6 py-10 text-[#e6edf1] sm:px-10">
+    <main className={`relative min-h-screen overflow-hidden px-6 pb-10 text-[#e6edf1] sm:px-10 ${isMounted && isMac ? "pt-14" : "pt-10"}`}>
+      <TitleBar />
       <div className="pointer-events-none absolute -left-24 top-16 h-72 w-72 rounded-full bg-[#7dff35]/18 blur-3xl" />
       <div className="pointer-events-none absolute -right-20 bottom-12 h-80 w-80 rounded-full bg-[#9bff2e]/14 blur-3xl" />
       <img
@@ -886,47 +1045,30 @@ export default function Home() {
             </p>
 
             <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <label className="grid gap-2 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
+              <div className="grid gap-2 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
                 <span className="text-sm text-[#d6dde2]">Upload logo (.svg, .png, .jpg, .webp)</span>
-                <input
-                  type="file"
-                  accept="image/svg+xml,image/png,image/jpeg,image/webp,.svg,.png,.jpg,.jpeg,.webp"
-                  onChange={async (event) => {
-                    const nextFile = event.target.files?.[0] ?? null;
-                    if (nextFile) {
-                      if (!isAcceptedLogoFile(nextFile)) {
-                        setLogoFile(null);
-                        setErrorMessage("Logo must be .svg, .png, .jpg/.jpeg, or .webp.");
-                        return;
-                      }
-                    }
-
-                    let processedFile: File | null = nextFile;
-                    if (nextFile && !isSvgLogoFile(nextFile)) {
-                      try {
-                        processedFile = await convertRasterLogoToSvg(nextFile);
-                      } catch {
-                        setLogoFile(null);
-                        setErrorMessage("Unable to convert logo image to SVG.");
-                        return;
-                      }
-                    }
-
-                    setErrorMessage("");
-                    setLogoFile(processedFile);
-                    setVideoFile(null);
-                    setResult(null);
-                    setRenderStatus(null);
-                    setStatusMessage(
-                      nextFile && !isSvgLogoFile(nextFile)
-                        ? "Phase 1 ready. Image logo converted to SVG for intro/outro rendering."
-                        : "Phase 1 ready. Review the preview, then continue to phase 2.",
-                    );
-                    setActivePhase(1);
-                  }}
-                  className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#9bff2e] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-[#0d1608] file:shadow-[0_0_14px_rgba(155,255,46,0.45)]"
-                />
-              </label>
+                <div className="flex flex-wrap items-center gap-3">
+                  {(!isMounted || !isElectron) ? (
+                    <input
+                      type="file"
+                      accept="image/svg+xml,image/png,image/jpeg,image/webp,.svg,.png,.jpg,.jpeg,.webp"
+                      onChange={(event) => handleLogoSelection(event.target.files?.[0] ?? null)}
+                      className="block flex-1 text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#9bff2e] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-[#0d1608] file:shadow-[0_0_14px_rgba(155,255,46,0.45)]"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const file = await handleNativePick("image");
+                        if (file) handleLogoSelection(file);
+                      }}
+                      className="inline-flex h-9 items-center justify-center rounded-full border border-[#7dff35]/55 bg-[#9bff2e]/10 px-4 text-xs font-semibold text-[#d5ffc2] transition hover:bg-[#9bff2e]/25"
+                    >
+                      Pick Native Logo
+                    </button>
+                  )}
+                </div>
+              </div>
 
               <div className="rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
                 <p className="text-sm text-[#d6dde2]">Preview (Intro + Outro)</p>
@@ -1018,6 +1160,20 @@ export default function Home() {
               >
                 Continue to Phase 2
               </button>
+              {!phase1Complete && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSubtitleHighlightColor("#E6FF00");
+                    setActivePhase(2);
+                    setErrorMessage("");
+                    setStatusMessage("Phase 2 unlocked. Upload your video.");
+                  }}
+                  className="inline-flex h-11 items-center justify-center rounded-full border border-white/10 bg-white/5 px-5 text-sm font-semibold text-[#dbe2e8] transition hover:bg-white/10"
+                >
+                  Skip Logo (Default Styling)
+                </button>
+              )}
             </div>
           </section>
 
@@ -1029,36 +1185,33 @@ export default function Home() {
             <p className="text-xs uppercase tracking-[0.2em] text-[#a4ff73]">Phase 2</p>
             <h2 className="mt-1 text-xl font-semibold">Upload Video</h2>
 
-            <label className="mt-4 grid gap-2 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
+            <div className="mt-4 grid gap-2 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
               <span className="text-sm text-[#d6dde2]">Main video file (.mp4, .mov, .m4v, .webm, .mkv)</span>
-              <input
-                type="file"
-                accept={VIDEO_UPLOAD_ACCEPT_ATTR}
-                disabled={!phase2Unlocked}
-                onChange={(event) => {
-                  const nextFile = event.target.files?.[0] ?? null;
-                  if (nextFile && !isLikelyVideoFile(nextFile)) {
-                    setVideoFile(null);
-                    setResult(null);
-                    setRenderStatus(null);
-                    setErrorMessage(
-                      "Video must be a supported format (.mp4, .mov, .m4v, .webm, .mkv, .avi).",
-                    );
-                    return;
-                  }
-
-                  setVideoFile(nextFile);
-                  setResult(null);
-                  setRenderStatus(null);
-                  if (nextFile) {
-                    setErrorMessage("");
-                    setStatusMessage("Phase 2 ready. Continue to phase 3 for final options and render.");
-                  }
-                }}
-                className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#9bff2e] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-[#0d1608] file:shadow-[0_0_14px_rgba(155,255,46,0.45)] disabled:opacity-55"
-              />
+              <div className="flex flex-wrap items-center gap-3">
+                {(!isMounted || !isElectron) ? (
+                  <input
+                    type="file"
+                    accept={VIDEO_UPLOAD_ACCEPT_ATTR}
+                    disabled={!phase2Unlocked}
+                    onChange={(event) => handleVideoSelection(event.target.files?.[0] ?? null)}
+                    className="block flex-1 text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#9bff2e] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-[#0d1608] file:shadow-[0_0_14px_rgba(155,255,46,0.45)] disabled:opacity-55"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    disabled={!phase2Unlocked}
+                    onClick={async () => {
+                      const file = await handleNativePick("video");
+                      if (file) handleVideoSelection(file);
+                    }}
+                    className="inline-flex h-9 items-center justify-center rounded-full border border-[#7dff35]/55 bg-[#9bff2e]/10 px-4 text-xs font-semibold text-[#d5ffc2] transition hover:bg-[#9bff2e]/25 disabled:opacity-55"
+                  >
+                    Pick Native Video
+                  </button>
+                )}
+              </div>
               {videoFile ? <span className="text-xs text-[#b1bcc5]">Selected: {videoFile.name}</span> : null}
-            </label>
+            </div>
 
             <div className="mt-4 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
               <p className="text-sm text-[#d6dde2]">Video format</p>
@@ -1086,6 +1239,18 @@ export default function Home() {
                   } disabled:cursor-not-allowed disabled:opacity-55`}
                 >
                   Landscape (16:9)
+                </button>
+                <button
+                  type="button"
+                  disabled={!phase2Unlocked}
+                  onClick={() => setVideoFormat("50/50")}
+                  className={`inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-semibold transition ${
+                    videoFormat === "50/50"
+                      ? "bg-[#9bff2e] text-[#0d1608] shadow-[0_0_16px_rgba(155,255,46,0.4)]"
+                      : "border border-[#7dff35]/55 bg-transparent text-[#dbe2e8] hover:bg-[#9bff2e]/15"
+                  } disabled:cursor-not-allowed disabled:opacity-55`}
+                >
+                  50/50 (Split)
                 </button>
               </div>
             </div>
@@ -1166,25 +1331,41 @@ export default function Home() {
               </p>
             </div>
 
+
+
             <div className="mt-4 rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
               <label className="grid gap-2">
                 <span className="text-sm text-[#d6dde2]">Intro + Outro audio (optional)</span>
-                <input
-                  type="file"
-                  accept={AUDIO_UPLOAD_ACCEPT_ATTR}
-                  disabled={!phase3Unlocked || isSubmitting || isAutoSummarizing}
-                  onChange={(event) => {
-                    const nextFile = event.target.files?.[0] ?? null;
-                    if (nextFile && !isAcceptedAudioFile(nextFile)) {
-                      setTrailerMusicFile(null);
-                      setErrorMessage("Audio must be a supported file (.mp3, .wav, .m4a, .aac, .ogg, .flac, .webm).");
-                      return;
-                    }
-                    setErrorMessage("");
-                    setTrailerMusicFile(nextFile);
-                  }}
-                  className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#9bff2e] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-[#0d1608] file:shadow-[0_0_14px_rgba(155,255,46,0.45)] disabled:opacity-55"
-                />
+                {(!isMounted || !isElectron) ? (
+                  <input
+                    type="file"
+                    accept={AUDIO_UPLOAD_ACCEPT_ATTR}
+                    disabled={!phase3Unlocked || isSubmitting || isAutoSummarizing}
+                    onChange={(event) => {
+                      const nextFile = event.target.files?.[0] ?? null;
+                      if (nextFile && !isAcceptedAudioFile(nextFile)) {
+                        setTrailerMusicFile(null);
+                        setErrorMessage("Audio must be a supported file (.mp3, .wav, .m4a, .aac, .ogg, .flac, .webm).");
+                        return;
+                      }
+                      setErrorMessage("");
+                      setTrailerMusicFile(nextFile);
+                    }}
+                    className="block text-sm text-[#e6edf1] file:mr-4 file:rounded-full file:border-0 file:bg-[#9bff2e] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-[#0d1608] file:shadow-[0_0_14px_rgba(155,255,46,0.45)] disabled:opacity-55"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    disabled={!phase3Unlocked || isSubmitting || isAutoSummarizing}
+                    onClick={async () => {
+                      const file = await handleNativePick("audio");
+                      if (file) setTrailerMusicFile(file);
+                    }}
+                    className="inline-flex h-9 w-fit items-center justify-center rounded-full border border-[#7dff35]/55 bg-[#9bff2e]/10 px-4 text-xs font-semibold text-[#d5ffc2] transition hover:bg-[#9bff2e]/25 disabled:opacity-55"
+                  >
+                    Pick Native Audio
+                  </button>
+                )}
                 <span className="text-xs text-[#9eabb6]">
                   {trailerMusicFile
                     ? `Selected: ${trailerMusicFile.name} (used for intro and outro)`
@@ -1406,13 +1587,24 @@ export default function Home() {
                 </div>
               ) : null}
 
-              <a
-                href={result.downloadUrl}
-                download={ensureMp4Filename(downloadFilename)}
-                className="inline-flex h-11 items-center justify-center rounded-full bg-[#9bff2e] px-5 text-sm font-semibold text-[#0d1608] shadow-[0_0_18px_rgba(155,255,46,0.4)] transition hover:bg-[#b9ff63] hover:shadow-[0_0_22px_rgba(155,255,46,0.5)]"
-              >
-                Download Final Video
-              </a>
+              <div className="flex flex-wrap gap-4">
+                <a
+                  href={result.downloadUrl}
+                  download={ensureMp4Filename(downloadFilename)}
+                  className="inline-flex h-11 items-center justify-center rounded-full bg-[#9bff2e] px-5 text-sm font-semibold text-[#0d1608] shadow-[0_0_18px_rgba(155,255,46,0.4)] transition hover:bg-[#b9ff63] hover:shadow-[0_0_22px_rgba(155,255,46,0.5)]"
+                >
+                  Download Final Video
+                </a>
+                {isMounted && isElectron && (
+                  <button
+                    type="button"
+                    onClick={handleNativeExport}
+                    className="inline-flex h-11 items-center justify-center rounded-full border border-[#7dff35]/55 bg-[#9bff2e]/10 px-5 text-sm font-semibold text-[#d5ffc2] transition hover:bg-[#9bff2e]/25"
+                  >
+                    Save to Disk...
+                  </button>
+                )}
+              </div>
 
               <div className="rounded-2xl border border-[#73ff3a]/30 bg-[#1b2a21]/75 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
