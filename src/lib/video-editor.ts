@@ -45,7 +45,7 @@ export type RenderVideoInput = {
     | "theater-chime"
     | "trailer-braam"
     | "piano-lift";
-  videoFormat?: "short" | "wide";
+  videoFormat?: "short" | "wide" | "50/50";
   lowerThirdTitle?: string;
   lowerThirdSubtitle?: string;
   lowerThirdStart?: number;
@@ -1039,7 +1039,7 @@ function buildAssFromTimedWords(input: {
   textColor: string;
   highlightColor: string;
   hideRanges: Array<{ startSeconds: number; endSeconds: number }>;
-  videoFormat?: "short" | "wide";
+  videoFormat?: "short" | "wide" | "50/50";
 }) {
   const isShort = input.videoFormat === "short";
   const playResX = isShort ? 1080 : 1920;
@@ -1813,6 +1813,7 @@ async function normalizeClip(params: {
   theme: RenderTheme;
   quality: EncodeProfile;
   enableRetroLook: boolean;
+  fontPath: string | null;
 
   logoPath?: string | null;
   videoFormat?: string;

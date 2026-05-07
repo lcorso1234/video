@@ -403,7 +403,7 @@ function buildYouTubeDescription(input: {
 function buildRenderFormData(input: {
   videoFile?: File | { nativePath: string; name: string; type?: string } | null;
   logoFile: File;
-  trailerMusicFile?: File | null;
+  trailerMusicFile?: File | { nativePath: string; name: string; type?: string } | null;
   videoFormat: "short" | "wide" | "50/50";
   credits: string;
   subtitleHighlightColor: string;
@@ -757,7 +757,7 @@ export default function Home() {
 
     const buffer = await window.electronAPI.readFile(filePath);
 
-    return new File([buffer], fileName, { type: mimeType });
+    return new File([buffer as any], fileName, { type: mimeType });
   }
 
   async function handleLogoSelection(file: File | null) {
@@ -1059,7 +1059,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={async () => {
-                        const file = await handleNativePick("image");
+                        const file = await handleNativePick("image") as File | null;
                         if (file) handleLogoSelection(file);
                       }}
                       className="inline-flex h-9 items-center justify-center rounded-full border border-[#7dff35]/55 bg-[#9bff2e]/10 px-4 text-xs font-semibold text-[#d5ffc2] transition hover:bg-[#9bff2e]/25"
